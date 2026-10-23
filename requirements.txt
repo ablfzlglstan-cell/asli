@@ -1,0 +1,7 @@
+python-telegram-bot==22.8
+requests
+httpx
+python-dotenv
+qrcode[pil]
+Pillow
+aiohttp
