@@ -54,7 +54,9 @@ async def _send_reaction_fast(bot, chat_id, message_id, emoji):
 
 
 HOME = Path.home()
-CONFIG_FILE = HOME / 'config.json'
+import os
+CONFIG_FILE = Path(os.environ.get('VYNEXA_CONFIG_DIR', '/tmp/vynexa_data')) / 'config.json'
+CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
 ORDERS_FILE = HOME / 'orders.json'
 USERS_FILE = HOME / 'users.json'
 ADMIN_ID_FILE = HOME / 'admin_id.txt'
