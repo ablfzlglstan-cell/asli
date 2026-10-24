@@ -54,12 +54,15 @@ async def _send_reaction_fast(bot, chat_id, message_id, emoji):
 
 
 HOME = Path.home()
-CONFIG_FILE = HOME / 'config.json'
-ORDERS_FILE = HOME / 'orders.json'
-USERS_FILE = HOME / 'users.json'
-ADMIN_ID_FILE = HOME / 'admin_id.txt'
-REFERRALS_FILE = HOME / 'referrals.json'
-GROUP_VERIFIED_FILE = HOME / 'vynexa_group_verified.json'
+import os
+CONFIG_DIR = Path(os.environ.get("VYNEXA_CONFIG_DIR", "/tmp/vynexa_data"))
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+CONFIG_FILE = CONFIG_DIR / "config.json"
+ORDERS_FILE = CONFIG_DIR / "orders.json"
+USERS_FILE = CONFIG_DIR / "users.json"
+ADMIN_ID_FILE = CONFIG_DIR / "admin_id.txt"
+REFERRALS_FILE = CONFIG_DIR / "referrals.json"
+GROUP_VERIFIED_FILE = CONFIG_DIR / "vynexa_group_verified.json"
 
 SUPPORT = '@vynexavpn1'
 JOIN_CHANNEL_ID = '@VynexaVPN'
@@ -361,15 +364,21 @@ async def referral_callback(update, context):
         )
 
 def find_token():
+    import os
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
+    if token and ":" in token.strip():
+        return token.strip()
     for p in (HOME / 'bot_old_backup.py', HOME / 'bot_before_v3.py', HOME / 'bot.py'):
         if p.exists():
-            s = p.read_text(encoding='utf-8', errors='ignore')
-            m = re.search(r'^TOKEN\s*=\s*[\'\"]([^\'\"]+)[\'\"]', s, re.M)
-            if m and ':' in m.group(1):
-                return m.group(1)
+            try:
+                text = p.read_text(encoding='utf-8', errors='ignore')
+                m = re.search(r'^TOKEN\s*=\s*[\'"]([^\'"]+)[\'"]', text, re.M)
+                if m and ':' in m.group(1):
+                    return m.group(1)
+            except Exception:
+                pass
     c = load_config()
     return c.get('token') or c.get('TOKEN')
-
 
 def admin_id():
     if ADMIN_ID_FILE.exists():
@@ -4579,7 +4588,7 @@ def main():
     global _VYNEXA_INSTANCE_LOCK
     try:
         import fcntl
-        _VYNEXA_INSTANCE_LOCK = open(HOME / '.vynexa_rebuilt_v22.lock', 'w')
+        _VYNEXA_INSTANCE_LOCK = open(CONFIG_DIR / ".vynexa_rebuilt_v22.lock", "w")
         fcntl.flock(_VYNEXA_INSTANCE_LOCK.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         raise SystemExit('VynexaVPN is already running; stop the duplicate process first.')
@@ -4689,7 +4698,7 @@ def main():
 
     _qr_bot_class.send_message = _qr_send_message_and_image
 
-    app.run_polling(poll_interval=5.0, timeout=10, bootstrap_retries=-1, drop_pending_updates=False, allowed_updates=Update.ALL_TYPES)
+    app.run_polling(poll_interval=0.0, timeout=10, bootstrap_retries=-1, drop_pending_updates=False, allowed_updates=Update.ALL_TYPES)
 
 
 
