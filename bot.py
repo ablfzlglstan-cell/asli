@@ -30,11 +30,68 @@ def ensure(u):
 def bal(uid):
  with con() as c:
   r=c.execute('SELECT balance FROM users WHERE uid=?',(uid,)).fetchone(); return r['balance'] if r else 0
+EMOJI_TARGETS={
+ 'stars':'خرید استارز','premium':'خرید پریمیوم','wallet':'کیف پول','orders':'سفارش‌های من',
+ 'links':'کانال‌ها و ربات‌ها','support':'پشتیبانی','admin':'پنل مدیریت',
+ 'product_stars':'بسته‌های استارز','product_premium':'بسته‌های پریمیوم','back':'بازگشت',
+ 'self':'برای خودم','other':'برای شخص دیگر','confirm':'تأیید','card':'پرداخت کارت‌به‌کارت',
+ 'paywallet':'پرداخت با کیف پول','topup':'افزایش موجودی','approve':'تأیید پرداخت',
+ 'reject':'رد سفارش','delivered':'ثبت تحویل','admin_orders':'سفارش‌های در انتظار',
+ 'admin_wallets':'درخواست‌های کیف پول','admin_price':'ویرایش قیمت','admin_links':'تنظیم لینک‌ها',
+ 'admin_emoji':'تنظیم ایموجی‌ها'
+}
+def icon_target(data):
+ if data=='buy:stars': return 'stars'
+ if data=='buy:premium': return 'premium'
+ if data=='wallet': return 'wallet'
+ if data=='orders': return 'orders'
+ if data=='ourlinks': return 'links'
+ if data=='support': return 'support'
+ if data=='admin': return 'admin'
+ if data.startswith('product:'): return 'product_'+data.split(':')[1]
+ if data in ('home',) or data.startswith('buy:'): return 'back'
+ if data=='recipient:self': return 'self'
+ if data=='recipient:other': return 'other'
+ if data=='recipient:confirm': return 'confirm'
+ if data=='pay:card': return 'card'
+ if data=='pay:wallet': return 'paywallet'
+ if data=='wallet:add': return 'topup'
+ if data.startswith('approve:'): return 'approve'
+ if data.startswith('reject:'): return 'reject'
+ if data.startswith('delivered:'): return 'delivered'
+ if data=='adm:orders': return 'admin_orders'
+ if data=='adm:wallets': return 'admin_wallets'
+ if data=='adm:price': return 'admin_price'
+ if data=='adm:links': return 'admin_links'
+ if data=='adm:emoji': return 'admin_emoji'
+ return None
+
 def b(text,data,style=None):
  a={'text':text,'callback_data':data}
  if style:a['style']=style
+ target=icon_target(data)
+ custom_id=setting('icon_'+target,'') if target else ''
+ if custom_id:
+  a['icon_custom_emoji_id']=custom_id
+  # Custom emoji is rendered as the button's leading icon, so remove the old leading emoji label.
+  for prefix in ('⭐','💎','👛','🧾','🌐','📞','🛠','⬅️','🙋','🎁','💳','❌','✏️','🏠','➕','✅','🎉','📋','💰','🎨'):
+   if text.startswith(prefix):
+    a['text']=text[len(prefix):].lstrip()
+    break
  try:return B(**a)
- except TypeError:a.pop('style',None);a.pop('icon_custom_emoji_id',None);return B(**a)
+ except TypeError:
+  a.pop('style',None)
+  try:return B(**a)
+  except TypeError:
+   a.pop('icon_custom_emoji_id',None); return B(**a)
+
+def emoji_picker_menu():
+ rows=[]
+ items=list(EMOJI_TARGETS.items())
+ for i in range(0,len(items),2):
+  rows.append([b(EMOJI_TARGETS[k],f'emoji:pick:{k}') for k,_ in items[i:i+2]])
+ rows.append([b('⬅️ پنل مدیریت','admin')])
+ return K(rows)
 def menu(uid):
  rows=[[b(f"{setting('emoji_stars','⭐')} خرید استارز",'buy:stars','success'),b(f"{setting('emoji_premium','💎')} خرید پریمیوم",'buy:premium','primary')],[b(f"{setting('emoji_wallet','👛')} کیف پول",'wallet'),b(f"{setting('emoji_orders','🧾')} سفارش‌های من",'orders')],[b(f"{setting('emoji_links','🌐')} کانال ها و ربات های ما",'ourlinks')],[b(f"{setting('emoji_support','📞')} پشتیبانی",'support')]]
  if uid in ADMINS: rows.append([b(f"{setting('emoji_admin','🛠')} پنل مدیریت",'admin','danger')])
@@ -72,6 +129,15 @@ async def help_command(up,ctx):
        '📞 <b>پشتیبانی:</b> برای پیگیری مشکل از این گزینه استفاده کن.\n\n'
        'برای برگشت به منو، دکمه زیر را بزن یا /start را ارسال کن.')
  await up.effective_message.reply_text(text,reply_markup=K([[b('🏠 منوی اصلی','home')]]),parse_mode=ParseMode.HTML,disable_web_page_preview=True)
+
+async def emoji_command(up,ctx):
+ u=up.effective_user
+ if not u or u.id not in ADMINS:
+  await up.effective_message.reply_text('این دستور فقط برای مدیر ربات است.')
+  return
+ for key in ('admin_setting_mode','await_custom_emoji'):
+  ctx.user_data.pop(key,None)
+ await up.effective_message.reply_text('🎨 <b>تنظیم ایموجی دکمه‌ها</b>\n\nدکمه‌ای را انتخاب کن؛ سپس خودِ ایموجی سفارشی تلگرام را در چت بفرست. برای هر دکمه جداگانه تکرار کن.',reply_markup=emoji_picker_menu(),parse_mode=ParseMode.HTML)
 
 async def payment_choice(q,p,recipient):
  await edit(q,f'🧾 <b>تأیید سفارش</b>\nمحصول: {p["title"]}\nگیرنده: <code>{recipient}</code>\nمبلغ: <b>{money(p["amount"])}</b>\n\nاگر اطلاعات درسته، روش پرداخت رو انتخاب کن:',K([[b('💳 کارت‌به‌کارت','pay:card','primary')],[b('👛 کیف پول','pay:wallet','success')],[b('✏️ تغییر گیرنده','recipient:other')],[b('❌ لغو','home')]]),ParseMode.HTML)
@@ -155,7 +221,14 @@ async def cb(up,ctx):
   ctx.user_data['admin_setting_mode']='links'; await edit(q,'برای تغییر هر لینک، یک خط با قالب زیر بفرست (چهار لینک قابل تنظیم است):\n1|عنوان|https://t.me/example\n2|عنوان|https://t.me/example\n3|عنوان|https://t.me/example\n4|عنوان|https://t.me/example',K([[b('⬅️ پنل','admin')]]))
  elif d=='adm:emoji':
   if u.id not in ADMINS:return
-  ctx.user_data['admin_setting_mode']='emoji'; await edit(q,'برای تغییر ایموجی‌ها یک خط برای هر مورد بفرست، مثل:\nstars=✨\npremium=👑\nwallet=💰\norders=📦\nlinks=🌐\nsupport=💬\nadmin=⚙️',K([[b('⬅️ پنل','admin')]]))
+  ctx.user_data.pop('admin_setting_mode',None); ctx.user_data.pop('await_custom_emoji',None)
+  await edit(q,'🎨 <b>کدام دکمه را می‌خواهی تغییر بدهی؟</b>\n\nانتخاب کن و بعد ایموجی سفارشی را بفرست.',emoji_picker_menu(),ParseMode.HTML)
+ elif d.startswith('emoji:pick:'):
+  if u.id not in ADMINS:return
+  key=d.split(':',2)[2]
+  if key not in EMOJI_TARGETS:return
+  ctx.user_data['await_custom_emoji']=key
+  await edit(q,f'🎨 <b>تغییر ایموجی: {EMOJI_TARGETS[key]}</b>\n\nحالا ایموجی سفارشی تلگرام را به‌صورت یک پیام بفرست. فقط فرستادن شکلک عادی کافی نیست؛ باید custom emoji خود تلگرام باشد.',K([[b('⬅️ فهرست دکمه‌ها','adm:emoji')],[b('⬅️ پنل مدیریت','admin')]]),ParseMode.HTML)
  elif d=='adm:orders':
   if u.id not in ADMINS:return
   with con() as c: rs=c.execute("SELECT id,uid,title,amount,status FROM orders WHERE status IN ('awaiting_receipt','paid_pending_delivery') ORDER BY id DESC LIMIT 20").fetchall()
@@ -195,6 +268,17 @@ async def messages(up,ctx):
  u=up.effective_user
  if not u:return
  ensure(u); m=up.effective_message
+ if ctx.user_data.get('await_custom_emoji') and u.id in ADMINS:
+  key=ctx.user_data['await_custom_emoji']
+  entities=m.entities or []
+  custom=next((e.custom_emoji_id for e in entities if e.type=='custom_emoji' and e.custom_emoji_id),None)
+  if not custom:
+   await m.reply_text('❌ این پیام ایموجی سفارشی قابل‌شناسایی نداشت. از پنل ایموجی‌های تلگرام یک custom emoji بفرست؛ نه ایموجی معمولی. برای لغو /emoji را بزن.')
+   return
+  set_setting('icon_'+key,custom)
+  ctx.user_data.pop('await_custom_emoji',None)
+  await m.reply_text(f'✅ ایموجی سفارشی برای «{EMOJI_TARGETS.get(key,key)}» ذخیره شد. برای تغییر مورد دیگر /emoji را بزن.',reply_markup=emoji_picker_menu())
+  return
  if m.text and ctx.user_data.get('await_recipient'):
   rec=m.text.strip(); ctx.user_data['await_recipient']=False
   if not (rec.startswith('@') and len(rec)>1 or rec.isdigit()): ctx.user_data['await_recipient']=True; await m.reply_text('فرمت آیدی درست نیست. @username یا آیدی عددی بفرست.'); return
@@ -227,12 +311,6 @@ async def messages(up,ctx):
      parts=line.split('|',2)
      if len(parts)==3 and parts[0].strip() in ('1','2','3','4') and parts[2].strip().startswith(('https://','http://','tg://')):
       i=parts[0].strip(); set_setting('link'+i+'_title',parts[1].strip()[:60]); set_setting('link'+i+'_url',parts[2].strip()); ok+=1
-   elif mode=='emoji':
-    mp={'stars':'emoji_stars','premium':'emoji_premium','wallet':'emoji_wallet','orders':'emoji_orders','links':'emoji_links','support':'emoji_support','admin':'emoji_admin'}
-    for line in lines:
-     if '=' in line:
-      k,v=line.split('=',1); k=k.strip(); v=v.strip()
-      if k in mp and v: set_setting(mp[k],v[:16]); ok+=1
    await m.reply_text(f'✅ تنظیمات ذخیره شد. موارد تغییرکرده: {ok}',reply_markup=menu(u.id))
   except Exception as e: logging.exception('settings update failed'); await m.reply_text('ذخیره تنظیمات ناموفق بود. دوباره امتحان کن.')
   return
@@ -275,5 +353,5 @@ async def post_init(app):
  logging.info('Vynexa Stars started')
 def main():
  if not TOKEN:raise SystemExit('BOT_TOKEN را در Environment Variables هاست تنظیم کن.')
- app=Application.builder().token(TOKEN).post_init(post_init).concurrent_updates(16).connection_pool_size(32).pool_timeout(10).build();app.add_handler(CommandHandler('start',start));app.add_handler(CommandHandler('help',help_command));app.add_handler(CallbackQueryHandler(cb));app.add_handler(MessageHandler(filters.PHOTO|(filters.TEXT&~filters.COMMAND),messages));app.run_polling(allowed_updates=Update.ALL_TYPES)
+ app=Application.builder().token(TOKEN).post_init(post_init).concurrent_updates(16).connection_pool_size(32).pool_timeout(10).build();app.add_handler(CommandHandler('start',start));app.add_handler(CommandHandler('help',help_command));app.add_handler(CommandHandler('emoji',emoji_command));app.add_handler(CallbackQueryHandler(cb));app.add_handler(MessageHandler(filters.PHOTO|(filters.TEXT&~filters.COMMAND),messages));app.run_polling(allowed_updates=Update.ALL_TYPES)
 if __name__=='__main__':main()
