@@ -1,4 +1,4 @@
-import os, sqlite3, logging
+import os, sqlite3, logging, json, time, urllib.request, asyncio
 from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton as B, InlineKeyboardMarkup as K
 from telegram.constants import ParseMode
@@ -10,6 +10,45 @@ ADMINS={int(x) for x in os.getenv('ADMIN_IDS','').split(',') if x.strip().isdigi
 DB=os.getenv('DB_PATH','vynexa_stars.sqlite3'); CARD=os.getenv('CARD_NUMBER','شماره کارت را در تنظیمات وارد کنید'); HOLDER=os.getenv('CARD_HOLDER','نام صاحب کارت را در تنظیمات وارد کنید'); SUPPORT=os.getenv('SUPPORT_USERNAME','fbugtjng').lstrip('@'); CUR=os.getenv('CURRENCY','تومان'); MIN_TOPUP=int(os.getenv('MIN_WALLET_TOPUP','10000'))
 PREM={k:int(os.getenv('PRICE_PREMIUM_'+k+'M','0')) for k in ('3','6','12')}; STARS={k:int(os.getenv('PRICE_STARS_'+k,'0')) for k in ('50','100','250','500','1000')}
 logging.basicConfig(level=logging.INFO)
+# Public Swap Wallet market endpoint: market prices are available without an API key.
+SWAPWALLET_PRICES_URL = 'https://swapwallet.app/api/v1/market/prices'
+_TON_RATE_CACHE = {'value': None, 'at': 0.0}
+
+def _extract_ton_irt(payload):
+ data = payload.get('result', payload) if isinstance(payload, dict) else {}
+ if not isinstance(data, dict): return None
+ def get_price(keys):
+  for key in keys:
+   value = data.get(key)
+   if isinstance(value, dict): value = value.get('price') or value.get('last') or value.get('rate')
+   try:
+    value = float(value)
+    if value > 0: return value
+   except (TypeError, ValueError): pass
+  return None
+ direct = get_price(('TON/IRT','TON_IRT','TONIRT','TON/IRR','TON_IRR'))
+ if direct: return direct
+ ton_usdt = get_price(('TON/USDT','TON_USDT','TONUSDT'))
+ usdt_irt = get_price(('USDT/IRT','USDT_IRT','USDTIRT'))
+ return ton_usdt * usdt_irt if ton_usdt and usdt_irt else None
+
+async def ton_rate_toman():
+ now_mono = time.monotonic()
+ if _TON_RATE_CACHE['value'] and now_mono - _TON_RATE_CACHE['at'] < 60:
+  return _TON_RATE_CACHE['value']
+ def fetch():
+  req = urllib.request.Request(SWAPWALLET_PRICES_URL, headers={'User-Agent':'VynexaStars/1.0','Accept':'application/json'})
+  with urllib.request.urlopen(req, timeout=5) as response:
+   return json.loads(response.read().decode('utf-8'))
+ try:
+  payload = await asyncio.to_thread(fetch)
+  rate = _extract_ton_irt(payload)
+  if rate and rate > 0:
+   _TON_RATE_CACHE.update(value=rate, at=time.monotonic())
+   return rate
+ except Exception as exc:
+  logging.warning('Swap Wallet TON price unavailable: %s', exc)
+ return _TON_RATE_CACHE['value']
 def now(): return datetime.now(timezone.utc).isoformat()
 def money(n): return f'{int(n):,} {CUR}'
 def con():
@@ -149,7 +188,9 @@ async def cb(up,ctx):
   _,kind,key=d.split(':'); price=(PREM if kind=='premium' else STARS)[key]
   if price<=0: await q.answer('قیمت این محصول هنوز تنظیم نشده.',show_alert=True); return
   title=({'3':'پریمیوم ۳ ماهه','6':'پریمیوم ۶ ماهه','12':'پریمیوم ۱۲ ماهه'}[key] if kind=='premium' else key+' استارز'); ctx.user_data['product']={'kind':kind,'key':key,'title':title,'amount':price}
-  await edit(q,f'🎯 <b>برای چه کسی سفارش می‌دی؟</b>\n\nمحصول: {title}\nمبلغ: <b>{money(price)}</b>',K([[b('🙋 برای خودم','recipient:self','success')],[b('🎁 برای شخص دیگر','recipient:other','primary')],[b('⬅️ بازگشت','buy:'+kind)]]),ParseMode.HTML)
+  rate = await ton_rate_toman()
+  rate_line = (f'\nنرخ لحظه‌ای TON در سواپ‌ولت: <b>{money(rate)}</b> برای هر TON\nمعادل تقریبی: <b>{price / rate:.4f} TON</b>' if rate else '\n⚠️ دریافت نرخ TON از سواپ‌ولت فعلاً ناموفق بود.')
+  await edit(q,f'🎯 <b>برای چه کسی سفارش می‌دی؟</b>\n\nمحصول: {title}\nمبلغ پایه: <b>{money(price)}</b>{rate_line}\n\nقیمت تومان طبق تنظیم مدیر است؛ معادل TON با نرخ بازار سواپ‌ولت محاسبه می‌شود.',K([[b('🙋 برای خودم','recipient:self','success')],[b('🎁 برای شخص دیگر','recipient:other','primary')],[b('⬅️ بازگشت','buy:'+kind)]]),ParseMode.HTML)
  elif d=='recipient:self':
   p=ctx.user_data.get('product')
   if not p: await edit(q,'از منو محصول رو انتخاب کن.',menu(u.id)); return
