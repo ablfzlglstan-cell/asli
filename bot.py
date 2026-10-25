@@ -1,6 +1,6 @@
-import os, sqlite3, logging, json, time, urllib.request, asyncio
+import os, sqlite3, logging, json, urllib.request, time, random, asyncio
 from datetime import datetime, timezone
-from telegram import Update, InlineKeyboardButton as B, InlineKeyboardMarkup as K
+from telegram import Update, InlineKeyboardButton as B, InlineKeyboardMarkup as K, ReactionTypeEmoji
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
@@ -9,48 +9,102 @@ TOKEN=os.getenv('BOT_TOKEN','').strip()
 ADMINS={int(x) for x in os.getenv('ADMIN_IDS','').split(',') if x.strip().isdigit()}
 DB=os.getenv('DB_PATH','vynexa_stars.sqlite3'); CARD=os.getenv('CARD_NUMBER','شماره کارت را در تنظیمات وارد کنید'); HOLDER=os.getenv('CARD_HOLDER','نام صاحب کارت را در تنظیمات وارد کنید'); SUPPORT=os.getenv('SUPPORT_USERNAME','fbugtjng').lstrip('@'); CUR=os.getenv('CURRENCY','تومان'); MIN_TOPUP=int(os.getenv('MIN_WALLET_TOPUP','10000'))
 PREM={k:int(os.getenv('PRICE_PREMIUM_'+k+'M','0')) for k in ('3','6','12')}; STARS={k:int(os.getenv('PRICE_STARS_'+k,'0')) for k in ('50','100','250','500','1000')}
+# TON price is public on SwapWallet; set TON_BASELINE_RATE in FadeHost to the old reference rate.
+TON_PRICE_URL=os.getenv('TON_PRICE_URL','https://swapwallet.app/api/v1/market/prices').strip()
+TON_BASELINE_RATE=float(os.getenv('TON_BASELINE_RATE','345000'))
+TON_RATE_CACHE={'value':None,'at':0.0}
+POSITIVE_REACTIONS=['❤️','👍','🔥','🥰','🎉','😁','😍','👏','💯','🤩','👌','🫶','💙','⭐','🚀','😊']
 logging.basicConfig(level=logging.INFO)
-# Public Swap Wallet market endpoint: market prices are available without an API key.
-SWAPWALLET_PRICES_URL = 'https://swapwallet.app/api/v1/market/prices'
-_TON_RATE_CACHE = {'value': None, 'at': 0.0}
-
-def _extract_ton_irt(payload):
- data = payload.get('result', payload) if isinstance(payload, dict) else {}
- if not isinstance(data, dict): return None
- def get_price(keys):
-  for key in keys:
-   value = data.get(key)
-   if isinstance(value, dict): value = value.get('price') or value.get('last') or value.get('rate')
-   try:
-    value = float(value)
-    if value > 0: return value
-   except (TypeError, ValueError): pass
-  return None
- direct = get_price(('TON/IRT','TON_IRT','TONIRT','TON/IRR','TON_IRR'))
- if direct: return direct
- ton_usdt = get_price(('TON/USDT','TON_USDT','TONUSDT'))
- usdt_irt = get_price(('USDT/IRT','USDT_IRT','USDTIRT'))
- return ton_usdt * usdt_irt if ton_usdt and usdt_irt else None
-
-async def ton_rate_toman():
- now_mono = time.monotonic()
- if _TON_RATE_CACHE['value'] and now_mono - _TON_RATE_CACHE['at'] < 60:
-  return _TON_RATE_CACHE['value']
- def fetch():
-  req = urllib.request.Request(SWAPWALLET_PRICES_URL, headers={'User-Agent':'VynexaStars/1.0','Accept':'application/json'})
-  with urllib.request.urlopen(req, timeout=5) as response:
-   return json.loads(response.read().decode('utf-8'))
- try:
-  payload = await asyncio.to_thread(fetch)
-  rate = _extract_ton_irt(payload)
-  if rate and rate > 0:
-   _TON_RATE_CACHE.update(value=rate, at=time.monotonic())
-   return rate
- except Exception as exc:
-  logging.warning('Swap Wallet TON price unavailable: %s', exc)
- return _TON_RATE_CACHE['value']
 def now(): return datetime.now(timezone.utc).isoformat()
 def money(n): return f'{int(n):,} {CUR}'
+
+def _find_ton_irt(obj):
+ # Accept common SwapWallet response layouts without assuming one wrapper shape.
+ if isinstance(obj, dict):
+  pair=' '.join(str(obj.get(k,'')) for k in ('symbol','pair','market','code','name','ticker','slug','baseAsset','base_asset','base','quoteAsset','quote_asset','quote')).upper().replace('_','/').replace('-','/')
+  if 'TON' in pair and ('IRT' in pair or 'TOMAN' in pair or 'RIAL' in pair):
+   for key in ('price','last','last_price','close','rate','value','irt','toman','quote_price'):
+    v=obj.get(key)
+    try:
+     n=float(v)
+     if n>0:return n
+    except (TypeError,ValueError):pass
+  # Some responses use a mapping such as {'TON/IRT': {'price': ...}}.
+  for k,v in obj.items():
+   ku=str(k).upper().replace('_','/').replace('-','/')
+   if 'TON' in ku and ('IRT' in ku or 'TOMAN' in ku or 'RIAL' in ku):
+    if isinstance(v,dict):
+     for key in ('price','last','last_price','close','rate','value'):
+      try:
+       n=float(v.get(key));
+       if n>0:return n
+      except (TypeError,ValueError):pass
+    else:
+     try:
+      n=float(v)
+      if n>0:return n
+     except (TypeError,ValueError):pass
+   found=_find_ton_irt(v)
+   if found:return found
+ elif isinstance(obj,list):
+  for v in obj:
+   found=_find_ton_irt(v)
+   if found:return found
+ return None
+
+async def live_ton_rate():
+ now_ts=time.time()
+ if TON_RATE_CACHE['value'] and now_ts-TON_RATE_CACHE['at']<60:
+  return TON_RATE_CACHE['value']
+ def fetch():
+  req=urllib.request.Request(TON_PRICE_URL,headers={'User-Agent':'VynexaStars/1.0','Accept':'application/json'})
+  with urllib.request.urlopen(req,timeout=8) as r:return json.loads(r.read().decode('utf-8'))
+ try:
+  payload=await asyncio.to_thread(fetch)
+  rate=_find_ton_irt(payload)
+  if not rate:
+   # Fallback for APIs that return TON's IRT value as an explicit asset record.
+   def scan(x):
+    if isinstance(x,dict):
+     name=' '.join(str(x.get(k,'')) for k in ('symbol','asset','currency','token','code','baseAsset','base_asset','base')).upper()
+     if 'TON' in name:
+      for k in ('price_irt','price_toman','irt_price','toman_price','price_irt_toman'):
+       try:
+        z=float(x.get(k));
+        if z>0:return z
+       except (TypeError,ValueError):pass
+     for v in x.values():
+      z=scan(v)
+      if z:return z
+    elif isinstance(x,list):
+     for v in x:
+      z=scan(v)
+      if z:return z
+    return None
+   rate=scan(payload)
+  if rate:
+   TON_RATE_CACHE.update(value=float(rate),at=now_ts)
+   return float(rate)
+  logging.warning('Could not find TON/IRT in SwapWallet prices response')
+ except Exception as e: logging.warning('SwapWallet TON price fetch failed: %s',e)
+ return TON_RATE_CACHE['value']
+
+async def current_price(kind,key):
+ base=(PREM if kind=='premium' else STARS).get(str(key),0)
+ rate=await live_ton_rate()
+ if base<=0:return base
+ if not rate or TON_BASELINE_RATE<=0:return base
+ return int(round(base*rate/TON_BASELINE_RATE/1000)*1000)
+
+async def react_private(update,context):
+ msg=update.effective_message
+ chat=update.effective_chat
+ if not msg or not chat or chat.type!='private' or not update.effective_user:return
+ # Keep reactions restricted to private user chats; no group/channel reactions.
+ try:
+  await context.bot.set_message_reaction(chat_id=chat.id,message_id=msg.message_id,reaction=[ReactionTypeEmoji(random.choice(POSITIVE_REACTIONS))])
+ except Exception as e:
+  logging.debug('Private message reaction unavailable: %s',e)
 def con():
  c=sqlite3.connect(DB,timeout=20); c.row_factory=sqlite3.Row; return c
 def init():
@@ -69,68 +123,11 @@ def ensure(u):
 def bal(uid):
  with con() as c:
   r=c.execute('SELECT balance FROM users WHERE uid=?',(uid,)).fetchone(); return r['balance'] if r else 0
-EMOJI_TARGETS={
- 'stars':'خرید استارز','premium':'خرید پریمیوم','wallet':'کیف پول','orders':'سفارش‌های من',
- 'links':'کانال‌ها و ربات‌ها','support':'پشتیبانی','admin':'پنل مدیریت',
- 'product_stars':'بسته‌های استارز','product_premium':'بسته‌های پریمیوم','back':'بازگشت',
- 'self':'برای خودم','other':'برای شخص دیگر','confirm':'تأیید','card':'پرداخت کارت‌به‌کارت',
- 'paywallet':'پرداخت با کیف پول','topup':'افزایش موجودی','approve':'تأیید پرداخت',
- 'reject':'رد سفارش','delivered':'ثبت تحویل','admin_orders':'سفارش‌های در انتظار',
- 'admin_wallets':'درخواست‌های کیف پول','admin_price':'ویرایش قیمت','admin_links':'تنظیم لینک‌ها',
- 'admin_emoji':'تنظیم ایموجی‌ها'
-}
-def icon_target(data):
- if data=='buy:stars': return 'stars'
- if data=='buy:premium': return 'premium'
- if data=='wallet': return 'wallet'
- if data=='orders': return 'orders'
- if data=='ourlinks': return 'links'
- if data=='support': return 'support'
- if data=='admin': return 'admin'
- if data.startswith('product:'): return 'product_'+data.split(':')[1]
- if data in ('home',) or data.startswith('buy:'): return 'back'
- if data=='recipient:self': return 'self'
- if data=='recipient:other': return 'other'
- if data=='recipient:confirm': return 'confirm'
- if data=='pay:card': return 'card'
- if data=='pay:wallet': return 'paywallet'
- if data=='wallet:add': return 'topup'
- if data.startswith('approve:'): return 'approve'
- if data.startswith('reject:'): return 'reject'
- if data.startswith('delivered:'): return 'delivered'
- if data=='adm:orders': return 'admin_orders'
- if data=='adm:wallets': return 'admin_wallets'
- if data=='adm:price': return 'admin_price'
- if data=='adm:links': return 'admin_links'
- if data=='adm:emoji': return 'admin_emoji'
- return None
-
 def b(text,data,style=None):
  a={'text':text,'callback_data':data}
  if style:a['style']=style
- target=icon_target(data)
- custom_id=setting('icon_'+target,'') if target else ''
- if custom_id:
-  a['icon_custom_emoji_id']=custom_id
-  # Custom emoji is rendered as the button's leading icon, so remove the old leading emoji label.
-  for prefix in ('⭐','💎','👛','🧾','🌐','📞','🛠','⬅️','🙋','🎁','💳','❌','✏️','🏠','➕','✅','🎉','📋','💰','🎨'):
-   if text.startswith(prefix):
-    a['text']=text[len(prefix):].lstrip()
-    break
  try:return B(**a)
- except TypeError:
-  a.pop('style',None)
-  try:return B(**a)
-  except TypeError:
-   a.pop('icon_custom_emoji_id',None); return B(**a)
-
-def emoji_picker_menu():
- rows=[]
- items=list(EMOJI_TARGETS.items())
- for i in range(0,len(items),2):
-  rows.append([b(EMOJI_TARGETS[k],f'emoji:pick:{k}') for k,_ in items[i:i+2]])
- rows.append([b('⬅️ پنل مدیریت','admin')])
- return K(rows)
+ except TypeError:a.pop('style',None);a.pop('icon_custom_emoji_id',None);return B(**a)
 def menu(uid):
  rows=[[b(f"{setting('emoji_stars','⭐')} خرید استارز",'buy:stars','success'),b(f"{setting('emoji_premium','💎')} خرید پریمیوم",'buy:premium','primary')],[b(f"{setting('emoji_wallet','👛')} کیف پول",'wallet'),b(f"{setting('emoji_orders','🧾')} سفارش‌های من",'orders')],[b(f"{setting('emoji_links','🌐')} کانال ها و ربات های ما",'ourlinks')],[b(f"{setting('emoji_support','📞')} پشتیبانی",'support')]]
  if uid in ADMINS: rows.append([b(f"{setting('emoji_admin','🛠')} پنل مدیریت",'admin','danger')])
@@ -169,15 +166,6 @@ async def help_command(up,ctx):
        'برای برگشت به منو، دکمه زیر را بزن یا /start را ارسال کن.')
  await up.effective_message.reply_text(text,reply_markup=K([[b('🏠 منوی اصلی','home')]]),parse_mode=ParseMode.HTML,disable_web_page_preview=True)
 
-async def emoji_command(up,ctx):
- u=up.effective_user
- if not u or u.id not in ADMINS:
-  await up.effective_message.reply_text('این دستور فقط برای مدیر ربات است.')
-  return
- for key in ('admin_setting_mode','await_custom_emoji'):
-  ctx.user_data.pop(key,None)
- await up.effective_message.reply_text('🎨 <b>تنظیم ایموجی دکمه‌ها</b>\n\nدکمه‌ای را انتخاب کن؛ سپس خودِ ایموجی سفارشی تلگرام را در چت بفرست. برای هر دکمه جداگانه تکرار کن.',reply_markup=emoji_picker_menu(),parse_mode=ParseMode.HTML)
-
 async def payment_choice(q,p,recipient):
  await edit(q,f'🧾 <b>تأیید سفارش</b>\nمحصول: {p["title"]}\nگیرنده: <code>{recipient}</code>\nمبلغ: <b>{money(p["amount"])}</b>\n\nاگر اطلاعات درسته، روش پرداخت رو انتخاب کن:',K([[b('💳 کارت‌به‌کارت','pay:card','primary')],[b('👛 کیف پول','pay:wallet','success')],[b('✏️ تغییر گیرنده','recipient:other')],[b('❌ لغو','home')]]),ParseMode.HTML)
 async def cb(up,ctx):
@@ -185,12 +173,10 @@ async def cb(up,ctx):
  if d=='home': ctx.user_data.pop('product',None); await edit(q,'✨ <b>Vynexa Stars</b>\nچه کاری برات انجام بدم؟',menu(u.id),ParseMode.HTML)
  elif d.startswith('buy:'): await edit(q,'بسته موردنظرت رو انتخاب کن:',product_menu(d.split(':')[1]))
  elif d.startswith('product:'):
-  _,kind,key=d.split(':'); price=(PREM if kind=='premium' else STARS)[key]
+  _,kind,key=d.split(':'); price=await current_price(kind,key)
   if price<=0: await q.answer('قیمت این محصول هنوز تنظیم نشده.',show_alert=True); return
   title=({'3':'پریمیوم ۳ ماهه','6':'پریمیوم ۶ ماهه','12':'پریمیوم ۱۲ ماهه'}[key] if kind=='premium' else key+' استارز'); ctx.user_data['product']={'kind':kind,'key':key,'title':title,'amount':price}
-  rate = await ton_rate_toman()
-  rate_line = (f'\nنرخ لحظه‌ای TON در سواپ‌ولت: <b>{money(rate)}</b> برای هر TON\nمعادل تقریبی: <b>{price / rate:.4f} TON</b>' if rate else '\n⚠️ دریافت نرخ TON از سواپ‌ولت فعلاً ناموفق بود.')
-  await edit(q,f'🎯 <b>برای چه کسی سفارش می‌دی؟</b>\n\nمحصول: {title}\nمبلغ پایه: <b>{money(price)}</b>{rate_line}\n\nقیمت تومان طبق تنظیم مدیر است؛ معادل TON با نرخ بازار سواپ‌ولت محاسبه می‌شود.',K([[b('🙋 برای خودم','recipient:self','success')],[b('🎁 برای شخص دیگر','recipient:other','primary')],[b('⬅️ بازگشت','buy:'+kind)]]),ParseMode.HTML)
+  await edit(q,f'🎯 <b>برای چه کسی سفارش می‌دی؟</b>\n\nمحصول: {title}\nمبلغ: <b>{money(price)}</b>',K([[b('🙋 برای خودم','recipient:self','success')],[b('🎁 برای شخص دیگر','recipient:other','primary')],[b('⬅️ بازگشت','buy:'+kind)]]),ParseMode.HTML)
  elif d=='recipient:self':
   p=ctx.user_data.get('product')
   if not p: await edit(q,'از منو محصول رو انتخاب کن.',menu(u.id)); return
@@ -262,14 +248,7 @@ async def cb(up,ctx):
   ctx.user_data['admin_setting_mode']='links'; await edit(q,'برای تغییر هر لینک، یک خط با قالب زیر بفرست (چهار لینک قابل تنظیم است):\n1|عنوان|https://t.me/example\n2|عنوان|https://t.me/example\n3|عنوان|https://t.me/example\n4|عنوان|https://t.me/example',K([[b('⬅️ پنل','admin')]]))
  elif d=='adm:emoji':
   if u.id not in ADMINS:return
-  ctx.user_data.pop('admin_setting_mode',None); ctx.user_data.pop('await_custom_emoji',None)
-  await edit(q,'🎨 <b>کدام دکمه را می‌خواهی تغییر بدهی؟</b>\n\nانتخاب کن و بعد ایموجی سفارشی را بفرست.',emoji_picker_menu(),ParseMode.HTML)
- elif d.startswith('emoji:pick:'):
-  if u.id not in ADMINS:return
-  key=d.split(':',2)[2]
-  if key not in EMOJI_TARGETS:return
-  ctx.user_data['await_custom_emoji']=key
-  await edit(q,f'🎨 <b>تغییر ایموجی: {EMOJI_TARGETS[key]}</b>\n\nحالا ایموجی سفارشی تلگرام را به‌صورت یک پیام بفرست. فقط فرستادن شکلک عادی کافی نیست؛ باید custom emoji خود تلگرام باشد.',K([[b('⬅️ فهرست دکمه‌ها','adm:emoji')],[b('⬅️ پنل مدیریت','admin')]]),ParseMode.HTML)
+  ctx.user_data['admin_setting_mode']='emoji'; await edit(q,'برای تغییر ایموجی‌ها یک خط برای هر مورد بفرست، مثل:\nstars=✨\npremium=👑\nwallet=💰\norders=📦\nlinks=🌐\nsupport=💬\nadmin=⚙️',K([[b('⬅️ پنل','admin')]]))
  elif d=='adm:orders':
   if u.id not in ADMINS:return
   with con() as c: rs=c.execute("SELECT id,uid,title,amount,status FROM orders WHERE status IN ('awaiting_receipt','paid_pending_delivery') ORDER BY id DESC LIMIT 20").fetchall()
@@ -309,17 +288,6 @@ async def messages(up,ctx):
  u=up.effective_user
  if not u:return
  ensure(u); m=up.effective_message
- if ctx.user_data.get('await_custom_emoji') and u.id in ADMINS:
-  key=ctx.user_data['await_custom_emoji']
-  entities=m.entities or []
-  custom=next((e.custom_emoji_id for e in entities if e.type=='custom_emoji' and e.custom_emoji_id),None)
-  if not custom:
-   await m.reply_text('❌ این پیام ایموجی سفارشی قابل‌شناسایی نداشت. از پنل ایموجی‌های تلگرام یک custom emoji بفرست؛ نه ایموجی معمولی. برای لغو /emoji را بزن.')
-   return
-  set_setting('icon_'+key,custom)
-  ctx.user_data.pop('await_custom_emoji',None)
-  await m.reply_text(f'✅ ایموجی سفارشی برای «{EMOJI_TARGETS.get(key,key)}» ذخیره شد. برای تغییر مورد دیگر /emoji را بزن.',reply_markup=emoji_picker_menu())
-  return
  if m.text and ctx.user_data.get('await_recipient'):
   rec=m.text.strip(); ctx.user_data['await_recipient']=False
   if not (rec.startswith('@') and len(rec)>1 or rec.isdigit()): ctx.user_data['await_recipient']=True; await m.reply_text('فرمت آیدی درست نیست. @username یا آیدی عددی بفرست.'); return
@@ -352,6 +320,12 @@ async def messages(up,ctx):
      parts=line.split('|',2)
      if len(parts)==3 and parts[0].strip() in ('1','2','3','4') and parts[2].strip().startswith(('https://','http://','tg://')):
       i=parts[0].strip(); set_setting('link'+i+'_title',parts[1].strip()[:60]); set_setting('link'+i+'_url',parts[2].strip()); ok+=1
+   elif mode=='emoji':
+    mp={'stars':'emoji_stars','premium':'emoji_premium','wallet':'emoji_wallet','orders':'emoji_orders','links':'emoji_links','support':'emoji_support','admin':'emoji_admin'}
+    for line in lines:
+     if '=' in line:
+      k,v=line.split('=',1); k=k.strip(); v=v.strip()
+      if k in mp and v: set_setting(mp[k],v[:16]); ok+=1
    await m.reply_text(f'✅ تنظیمات ذخیره شد. موارد تغییرکرده: {ok}',reply_markup=menu(u.id))
   except Exception as e: logging.exception('settings update failed'); await m.reply_text('ذخیره تنظیمات ناموفق بود. دوباره امتحان کن.')
   return
@@ -394,5 +368,5 @@ async def post_init(app):
  logging.info('Vynexa Stars started')
 def main():
  if not TOKEN:raise SystemExit('BOT_TOKEN را در Environment Variables هاست تنظیم کن.')
- app=Application.builder().token(TOKEN).post_init(post_init).concurrent_updates(16).connection_pool_size(32).pool_timeout(10).build();app.add_handler(CommandHandler('start',start));app.add_handler(CommandHandler('help',help_command));app.add_handler(CommandHandler('emoji',emoji_command));app.add_handler(CallbackQueryHandler(cb));app.add_handler(MessageHandler(filters.PHOTO|(filters.TEXT&~filters.COMMAND),messages));app.run_polling(allowed_updates=Update.ALL_TYPES)
+ app=Application.builder().token(TOKEN).post_init(post_init).concurrent_updates(16).connection_pool_size(32).pool_timeout(10).build();app.add_handler(CommandHandler('start',start));app.add_handler(CommandHandler('help',help_command));app.add_handler(CallbackQueryHandler(cb));app.add_handler(MessageHandler(filters.ALL & filters.ChatType.PRIVATE,react_private),group=-1);app.add_handler(MessageHandler(filters.PHOTO|(filters.TEXT&~filters.COMMAND),messages));app.run_polling(allowed_updates=Update.ALL_TYPES)
 if __name__=='__main__':main()
