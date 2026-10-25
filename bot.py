@@ -1,4 +1,4 @@
-import os, sqlite3, logging, json, urllib.request, time, random, asyncio
+import os, sqlite3, logging, json, re, random, urllib.request, asyncio
 from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton as B, InlineKeyboardMarkup as K, ReactionTypeEmoji
 from telegram.constants import ParseMode
@@ -9,102 +9,9 @@ TOKEN=os.getenv('BOT_TOKEN','').strip()
 ADMINS={int(x) for x in os.getenv('ADMIN_IDS','').split(',') if x.strip().isdigit()}
 DB=os.getenv('DB_PATH','vynexa_stars.sqlite3'); CARD=os.getenv('CARD_NUMBER','شماره کارت را در تنظیمات وارد کنید'); HOLDER=os.getenv('CARD_HOLDER','نام صاحب کارت را در تنظیمات وارد کنید'); SUPPORT=os.getenv('SUPPORT_USERNAME','fbugtjng').lstrip('@'); CUR=os.getenv('CURRENCY','تومان'); MIN_TOPUP=int(os.getenv('MIN_WALLET_TOPUP','10000'))
 PREM={k:int(os.getenv('PRICE_PREMIUM_'+k+'M','0')) for k in ('3','6','12')}; STARS={k:int(os.getenv('PRICE_STARS_'+k,'0')) for k in ('50','100','250','500','1000')}
-# TON price is public on SwapWallet; set TON_BASELINE_RATE in FadeHost to the old reference rate.
-TON_PRICE_URL=os.getenv('TON_PRICE_URL','https://swapwallet.app/api/v1/market/prices').strip()
-TON_BASELINE_RATE=float(os.getenv('TON_BASELINE_RATE','345000'))
-TON_RATE_CACHE={'value':None,'at':0.0}
-POSITIVE_REACTIONS=['❤️','👍','🔥','🥰','🎉','😁','😍','👏','💯','🤩','👌','🫶','💙','⭐','🚀','😊']
 logging.basicConfig(level=logging.INFO)
 def now(): return datetime.now(timezone.utc).isoformat()
 def money(n): return f'{int(n):,} {CUR}'
-
-def _find_ton_irt(obj):
- # Accept common SwapWallet response layouts without assuming one wrapper shape.
- if isinstance(obj, dict):
-  pair=' '.join(str(obj.get(k,'')) for k in ('symbol','pair','market','code','name','ticker','slug','baseAsset','base_asset','base','quoteAsset','quote_asset','quote')).upper().replace('_','/').replace('-','/')
-  if 'TON' in pair and ('IRT' in pair or 'TOMAN' in pair or 'RIAL' in pair):
-   for key in ('price','last','last_price','close','rate','value','irt','toman','quote_price'):
-    v=obj.get(key)
-    try:
-     n=float(v)
-     if n>0:return n
-    except (TypeError,ValueError):pass
-  # Some responses use a mapping such as {'TON/IRT': {'price': ...}}.
-  for k,v in obj.items():
-   ku=str(k).upper().replace('_','/').replace('-','/')
-   if 'TON' in ku and ('IRT' in ku or 'TOMAN' in ku or 'RIAL' in ku):
-    if isinstance(v,dict):
-     for key in ('price','last','last_price','close','rate','value'):
-      try:
-       n=float(v.get(key));
-       if n>0:return n
-      except (TypeError,ValueError):pass
-    else:
-     try:
-      n=float(v)
-      if n>0:return n
-     except (TypeError,ValueError):pass
-   found=_find_ton_irt(v)
-   if found:return found
- elif isinstance(obj,list):
-  for v in obj:
-   found=_find_ton_irt(v)
-   if found:return found
- return None
-
-async def live_ton_rate():
- now_ts=time.time()
- if TON_RATE_CACHE['value'] and now_ts-TON_RATE_CACHE['at']<60:
-  return TON_RATE_CACHE['value']
- def fetch():
-  req=urllib.request.Request(TON_PRICE_URL,headers={'User-Agent':'VynexaStars/1.0','Accept':'application/json'})
-  with urllib.request.urlopen(req,timeout=8) as r:return json.loads(r.read().decode('utf-8'))
- try:
-  payload=await asyncio.to_thread(fetch)
-  rate=_find_ton_irt(payload)
-  if not rate:
-   # Fallback for APIs that return TON's IRT value as an explicit asset record.
-   def scan(x):
-    if isinstance(x,dict):
-     name=' '.join(str(x.get(k,'')) for k in ('symbol','asset','currency','token','code','baseAsset','base_asset','base')).upper()
-     if 'TON' in name:
-      for k in ('price_irt','price_toman','irt_price','toman_price','price_irt_toman'):
-       try:
-        z=float(x.get(k));
-        if z>0:return z
-       except (TypeError,ValueError):pass
-     for v in x.values():
-      z=scan(v)
-      if z:return z
-    elif isinstance(x,list):
-     for v in x:
-      z=scan(v)
-      if z:return z
-    return None
-   rate=scan(payload)
-  if rate:
-   TON_RATE_CACHE.update(value=float(rate),at=now_ts)
-   return float(rate)
-  logging.warning('Could not find TON/IRT in SwapWallet prices response')
- except Exception as e: logging.warning('SwapWallet TON price fetch failed: %s',e)
- return TON_RATE_CACHE['value']
-
-async def current_price(kind,key):
- base=(PREM if kind=='premium' else STARS).get(str(key),0)
- rate=await live_ton_rate()
- if base<=0:return base
- if not rate or TON_BASELINE_RATE<=0:return base
- return int(round(base*rate/TON_BASELINE_RATE/1000)*1000)
-
-async def react_private(update,context):
- msg=update.effective_message
- chat=update.effective_chat
- if not msg or not chat or chat.type!='private' or not update.effective_user:return
- # Keep reactions restricted to private user chats; no group/channel reactions.
- try:
-  await context.bot.set_message_reaction(chat_id=chat.id,message_id=msg.message_id,reaction=[ReactionTypeEmoji(random.choice(POSITIVE_REACTIONS))])
- except Exception as e:
-  logging.debug('Private message reaction unavailable: %s',e)
 def con():
  c=sqlite3.connect(DB,timeout=20); c.row_factory=sqlite3.Row; return c
 def init():
@@ -128,8 +35,68 @@ def b(text,data,style=None):
  if style:a['style']=style
  try:return B(**a)
  except TypeError:a.pop('style',None);a.pop('icon_custom_emoji_id',None);return B(**a)
+TON_CACHE = {"value": None, "at": 0}
+def _fetch_ton_rate():
+    """Read public TON/IRT price from SwapWallet's public market endpoint/page."""
+    urls = ["https://swapwallet.app/api/v1/market/prices", "https://swapwallet.app/en/prices"]
+    for url in urls:
+        try:
+            req=urllib.request.Request(url, headers={"User-Agent":"Mozilla/5.0 VynexaStars/1.0","Accept":"application/json,text/html,*/*"})
+            with urllib.request.urlopen(req, timeout=7) as response: body=response.read().decode("utf-8","ignore")
+            try:
+                data=json.loads(body)
+                def walk(x):
+                    if isinstance(x,dict):
+                        sym=str(x.get("symbol",x.get("code",x.get("ticker","")))).upper()
+                        name=str(x.get("name",x.get("asset", ""))).upper()
+                        if sym=="TON" or ("TON" in name and "TONCOIN" in name):
+                            for k in ("price_irt","price_irr","irt","price_toman","price","last_price","value"):
+                                v=x.get(k)
+                                if isinstance(v,(int,float)) and v>1000:return float(v)
+                        for v in x.values():
+                            found=walk(v)
+                            if found:return found
+                    elif isinstance(x,list):
+                        for v in x:
+                            found=walk(v)
+                            if found:return found
+                    return None
+                rate=walk(data)
+                if rate:return rate
+            except Exception: pass
+            # Public prices page fallback: isolate TON row and its first IRT amount.
+            plain=re.sub(r"<[^>]+>"," ",body,flags=re.S)
+            plain=re.sub(r"\s+"," ",plain)
+            m=re.search(r"(?:Toncoin|TON)\s*(?:TON)?\s*([0-9][0-9,٬.]*)",plain,re.I)
+            if m:
+                val=m.group(1).replace(",","").replace("٬","")
+                if "." in val and val.count(".")==1 and len(val.split(".")[-1])<=2: val=val.split(".")[0]
+                if val.isdigit() and int(val)>1000:return float(val)
+        except Exception as e: logging.warning("TON rate source failed (%s): %s",url,str(e)[:120])
+    return None
+async def ton_rate():
+    import time
+    if TON_CACHE["value"] and time.time()-TON_CACHE["at"]<60:return TON_CACHE["value"]
+    rate=await asyncio.to_thread(_fetch_ton_rate)
+    if rate:
+        TON_CACHE.update(value=float(rate),at=time.time())
+        # Initialize reference rates for existing admin prices once, so they remain the baseline.
+        with con() as c:
+            for kind, prices in (("premium",PREM),("stars",STARS)):
+                for key, price in prices.items():
+                    rk=f"ton_ref_{kind}_{key}"
+                    c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",(rk,str(rate)))
+    return rate
+async def current_price(kind,key):
+    base=(PREM if kind=="premium" else STARS)[key]
+    rate=await ton_rate()
+    if not rate:return base
+    ref=float(setting(f"ton_ref_{kind}_{key}",str(rate)) or rate)
+    if ref<=0:return base
+    return max(1,round(base*rate/ref))
+
 def menu(uid):
- rows=[[b(f"{setting('emoji_stars','⭐')} خرید استارز",'buy:stars','success'),b(f"{setting('emoji_premium','💎')} خرید پریمیوم",'buy:premium','primary')],[b(f"{setting('emoji_wallet','👛')} کیف پول",'wallet'),b(f"{setting('emoji_orders','🧾')} سفارش‌های من",'orders')],[b(f"{setting('emoji_links','🌐')} کانال ها و ربات های ما",'ourlinks')],[b(f"{setting('emoji_support','📞')} پشتیبانی",'support')]]
+ rows=[[b(f"{setting('emoji_stars','⭐')} خرید استارز",'buy:stars','success'),b(f"{setting('emoji_premium','💎')} خرید پریمیوم",'buy:premium','primary')],[b(f"{setting('emoji_wallet','👛')} کیف پول",'wallet'),b(f"{setting('emoji_orders','🧾')} سفارش‌های من",'orders')],[b(f"{setting('emoji_links','🌐')} کانال ها و ربات های ما",'ourlinks')],[b('🎁 گیفت تلگرام','feature:gift'),b('🚀 بوست چنل','feature:boost')],[b(f"{setting('emoji_support','📞')} پشتیبانی",'support')]]
  if uid in ADMINS: rows.append([b(f"{setting('emoji_admin','🛠')} پنل مدیریت",'admin','danger')])
  return K(rows)
 def links_menu():
@@ -208,6 +175,8 @@ async def cb(up,ctx):
   with con() as c: rs=c.execute('SELECT id,title,amount,status FROM orders WHERE uid=? ORDER BY id DESC LIMIT 10',(u.id,)).fetchall()
   names={'awaiting_receipt':'در انتظار رسید','paid_pending_delivery':'در انتظار تحویل','delivered':'تحویل‌شده','rejected':'ردشده'}; text='🧾 <b>سفارش‌های من</b>\n\n'+('\n\n'.join(f"#{r['id']} · {r['title']} · {money(r['amount'])}\nوضعیت: {names.get(r['status'],r['status'])}" for r in rs) if rs else 'هنوز سفارشی نداری.')
   await edit(q,text,K([[b('⬅️ منو','home')]]),ParseMode.HTML)
+ elif d=='feature:gift': await q.answer('🎁 این بخش هنوز آماده نشده است. تیم وینکسا در حال تکمیل این قابلیت است؛ لطفاً بعداً دوباره سر بزن.',show_alert=True)
+ elif d=='feature:boost': await q.answer('🚀 بخش بوست چنل هنوز آماده نشده است. به‌محض تکمیل، از همین‌جا در دسترس قرار می‌گیرد.',show_alert=True)
  elif d=='support': await edit(q,f'📞 پشتیبانی: @{SUPPORT}',K([[b('⬅️ منو','home')]]))
  elif d=='admin':
   if u.id not in ADMINS:return
@@ -239,6 +208,8 @@ async def cb(up,ctx):
   kind,product_key=key.split(':',1)
   setting_key=('PRICE_PREMIUM_'+product_key+'M') if kind=='premium' else ('PRICE_STARS_'+product_key)
   set_setting(setting_key,str(amount))
+  live_rate=await ton_rate()
+  if live_rate:set_setting(f'ton_ref_{kind}_{product_key}',str(live_rate))
   if kind=='premium': PREM[product_key]=amount
   else: STARS[product_key]=amount
   for k in ('pending_price_key','pending_price_amount','pending_price_title'):ctx.user_data.pop(k,None)
@@ -359,6 +330,15 @@ async def messages(up,ctx):
     ctx.user_data.pop('wallet_receipt',None);return
   await m.reply_text('برای این رسید سفارش در انتظاری پیدا نشد. /start')
  elif m.text:await m.reply_text('برای دیدن منو /start رو بزن.',reply_markup=menu(u.id))
+async def auto_react(up,ctx):
+ m=up.effective_message; chat=up.effective_chat
+ if not m or not chat or chat.type!="private" or (up.effective_user and up.effective_user.is_bot):return
+ choices=["❤️","👍","🔥","🥰","🎉","👏","😍","💯","😁","🤩"]
+ try:
+  await ctx.bot.set_message_reaction(chat_id=chat.id,message_id=m.message_id,reaction=[ReactionTypeEmoji(random.choice(choices))],is_big=False)
+ except (TelegramError,AttributeError,TypeError) as e:
+  logging.debug("Private auto-reaction failed: %s",str(e)[:160])
+
 async def post_init(app):
  init()
  for k in ('3','6','12'): PREM[k]=int(setting('PRICE_PREMIUM_'+k+'M',str(PREM[k])))
@@ -368,5 +348,5 @@ async def post_init(app):
  logging.info('Vynexa Stars started')
 def main():
  if not TOKEN:raise SystemExit('BOT_TOKEN را در Environment Variables هاست تنظیم کن.')
- app=Application.builder().token(TOKEN).post_init(post_init).concurrent_updates(16).connection_pool_size(32).pool_timeout(10).build();app.add_handler(CommandHandler('start',start));app.add_handler(CommandHandler('help',help_command));app.add_handler(CallbackQueryHandler(cb));app.add_handler(MessageHandler(filters.ALL & filters.ChatType.PRIVATE,react_private),group=-1);app.add_handler(MessageHandler(filters.PHOTO|(filters.TEXT&~filters.COMMAND),messages));app.run_polling(allowed_updates=Update.ALL_TYPES)
+ app=Application.builder().token(TOKEN).post_init(post_init).concurrent_updates(16).connection_pool_size(32).pool_timeout(10).build();app.add_handler(CommandHandler('start',start));app.add_handler(CommandHandler('help',help_command));app.add_handler(CallbackQueryHandler(cb));app.add_handler(MessageHandler(filters.PHOTO|(filters.TEXT&~filters.COMMAND),messages));app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.ALL,auto_react),group=1);app.run_polling(allowed_updates=Update.ALL_TYPES)
 if __name__=='__main__':main()
