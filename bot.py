@@ -110,7 +110,10 @@ def links_menu():
  rows.append([b('⬅️ بازگشت','home')]); return K(rows)
 def product_menu(kind):
  data=PREM if kind=='premium' else STARS; labels={'3':'پریمیوم ۳ ماهه','6':'پریمیوم ۶ ماهه','12':'پریمیوم ۱۲ ماهه'}
- return K([[b(labels.get(k,k+' استارز'),f'product:{kind}:{k}')] for k,v in data.items()]+[[b('⬅️ بازگشت','home')]])
+ rows=[[b(labels.get(k,k+' استارز'),f'product:{kind}:{k}')] for k,v in data.items()]
+ if kind=='stars': rows.append([b('✨ استارز دلخواه','stars:custom')])
+ rows.append([b('⬅️ بازگشت','home')])
+ return K(rows)
 async def edit(q,text,markup=None,pm=None):
  try: await q.edit_message_text(text,reply_markup=markup,parse_mode=pm,disable_web_page_preview=True)
  except TelegramError: await q.message.reply_text(text,reply_markup=markup,parse_mode=pm)
@@ -156,6 +159,9 @@ async def cb(up,ctx):
  q=up.callback_query; await q.answer(); u=up.effective_user; ensure(u); d=q.data
  if d=='home': ctx.user_data.pop('product',None); await edit(q,'✨ <b>Vynexa Stars</b>\nچه کاری برات انجام بدم؟',menu(u.id),ParseMode.HTML)
  elif d.startswith('buy:'): await edit(q,'بسته موردنظرت رو انتخاب کن:',product_menu(d.split(':')[1]))
+ elif d=='stars:custom':
+  ctx.user_data['await_custom_stars']=True
+  await edit(q,'✨ تعداد استارز دلخواهت رو به عدد بفرست (مثلاً 175).',K([[b('⬅️ بازگشت','buy:stars')]]))
  elif d.startswith('product:'):
   _,kind,key=d.split(':'); price=await current_price(kind,key)
   if price<=0: await q.answer('قیمت این محصول هنوز تنظیم نشده.',show_alert=True); return
@@ -286,6 +292,17 @@ async def messages(up,ctx):
  u=up.effective_user
  if not u:return
  ensure(u); m=up.effective_message
+ if m.text and ctx.user_data.get('await_custom_stars'):
+  raw=m.text.replace(',','').replace('٬','').replace('،','').strip()
+  if not raw.isdigit() or not (1 <= int(raw) <= 100000):
+   await m.reply_text('تعداد معتبر وارد کن؛ عددی بین 1 تا 100000.')
+   return
+  count=int(raw); ctx.user_data['await_custom_stars']=False
+  unit=await current_price('stars','1000')/1000
+  amount=max(1,round(unit*count))
+  ctx.user_data['product']={'kind':'stars','key':'custom_'+str(count),'title':f'{count:,} استارز دلخواه','amount':amount}
+  await m.reply_text(f'✨ تعداد انتخاب‌شده: {count:,} استارز\n💰 مبلغ: {money(amount)}\n\nبرای ادامه گیرنده رو انتخاب کن:',reply_markup=K([[b('🙋 برای خودم','recipient:self','success')],[b('🎁 برای شخص دیگر','recipient:other','primary')],[b('⬅️ بازگشت','buy:stars')]]))
+  return
  if m.text and ctx.user_data.get('await_recipient'):
   rec=m.text.strip(); ctx.user_data['await_recipient']=False
   if not (rec.startswith('@') and len(rec)>1 or rec.isdigit()): ctx.user_data['await_recipient']=True; await m.reply_text('فرمت آیدی درست نیست. @username یا آیدی عددی بفرست.'); return
@@ -359,16 +376,14 @@ async def messages(up,ctx):
  elif m.text:await m.reply_text('برای دیدن منو /start رو بزن.',reply_markup=menu(u.id))
 async def auto_react(up,ctx):
  m=up.effective_message; chat=up.effective_chat
- if not m or not chat or chat.type!="private" or (up.effective_user and up.effective_user.is_bot):return
- logging.info("Auto-reaction handler reached: chat=%s message=%s",chat.id,m.message_id)
- # Use standard Telegram emoji only; custom/premium emoji reactions are not guaranteed for bots.
- choices=["👍","❤️","🔥","🥰","🎉","👏","😍","💯","🤩","😁","😊","🙏","💖","💕","😘","🤗","💪","⭐","🌟","✨","👌","🫶","🤣","❤","💋","😇","😻","💐","🥳"]
+ if not m or not chat or chat.type!="private" or (up.effective_user and up.effective_user.is_bot): return
+ # Telegram bots are limited to one reaction per message; choose from standard emoji.
+ choices=["❤️","🔥","🥰","🎉","👏","😍","💯","🤩","😁","😊","🙏","💖","💕","🤗","💪","⭐","🌟","✨","👌","🫶","🤣","👍","🥳"]
  chosen=random.choice(choices)
  try:
-  await ctx.bot.set_message_reaction(chat_id=chat.id,message_id=m.message_id,reaction=[ReactionTypeEmoji(chosen)],is_big=False)
+  await ctx.bot.set_message_reaction(chat_id=chat.id,message_id=m.message_id,reaction=[ReactionTypeEmoji(emoji=chosen)],is_big=False)
   logging.info("Auto-reaction set: chat=%s message=%s emoji=%s",chat.id,m.message_id,chosen)
  except Exception as e:
-  # Keep the actual Telegram/API reason visible in normal FadeHost logs.
   logging.warning("Auto-reaction failed: chat=%s message=%s emoji=%s error=%s",chat.id,m.message_id,chosen,str(e)[:300])
 
 async def post_init(app):
