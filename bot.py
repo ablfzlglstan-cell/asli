@@ -94,10 +94,12 @@ async def current_price(kind,key):
     if not rate:return base
     ref=float(setting(f"ton_ref_{kind}_{key}",str(rate)) or rate)
     if ref<=0:return base
-    return max(1,round(base*rate/ref))
+    # Price floor: a TON price drop never lowers the configured product price.
+    # Only a rise above the reference rate can increase the customer price.
+    return max(base, round(base*rate/ref))
 
 def menu(uid):
- rows=[[b(f"{setting('emoji_stars','⭐')} خرید استارز",'buy:stars','success'),b(f"{setting('emoji_premium','💎')} خرید پریمیوم",'buy:premium','primary')],[b(f"{setting('emoji_wallet','👛')} کیف پول",'wallet'),b(f"{setting('emoji_orders','🧾')} سفارش‌های من",'orders')],[b(f"{setting('emoji_links','🌐')} کانال ها و ربات های ما",'ourlinks')],[b('🎁 گیفت تلگرام','feature:gift'),b('🚀 بوست چنل','feature:boost')],[b(f"{setting('emoji_support','📞')} پشتیبانی",'support')]]
+ rows=[[b(f"{setting('emoji_stars','⭐')} خرید استارز",'buy:stars','success'),b(f"{setting('emoji_premium','💎')} خرید پریمیوم",'buy:premium','primary')],[b(f"{setting('emoji_wallet','👛')} کیف پول",'wallet'),b(f"{setting('emoji_orders','🧾')} سفارش‌های من",'orders')],[b(f"{setting('emoji_links','🌐')} کانال ها و ربات های ما",'ourlinks')],[b('🎁 گیفت تلگرام','feature:gift'),b('🚀 بوست چنل','feature:boost')],[b('🔐 چگونه بهتون اعتماد کنم؟','trust')],[b(f"{setting('emoji_support','📞')} پشتیبانی",'support')]]
  if uid in ADMINS: rows.append([b(f"{setting('emoji_admin','🛠')} پنل مدیریت",'admin','danger')])
  return K(rows)
 def links_menu():
@@ -119,7 +121,13 @@ async def admins(ctx,text,markup=None):
  for aid in ADMINS: await notify(ctx,aid,text,markup)
 def order_buttons(oid): return K([[b('✅ تأیید پرداخت',f'approve:{oid}','success'),b('❌ رد سفارش',f'reject:{oid}','danger')],[b('🎉 ثبت تحویل',f'delivered:{oid}','primary')]])
 async def start(up,ctx):
- ensure(up.effective_user); await up.effective_message.reply_text('✨ <b>به Vynexa Stars خوش اومدی</b>\n\nدنیای بدون مرز 💙\nاز منو استارز یا پریمیوم سفارش بده.',reply_markup=menu(up.effective_user.id),parse_mode=ParseMode.HTML)
+ ensure(up.effective_user)
+ welcome = ('✨ <b>به Vynexa Stars خوش اومدی!</b>\n\n'
+  'اینجا می‌تونی بسته‌های استارز و تلگرام پریمیوم رو بررسی کنی و سفارشت رو ثبت کنی.\n'
+  'قبل از پرداخت، فاکتور و مبلغ نهایی بهت نمایش داده می‌شه تا با خیال راحت بررسیش کنی.\n\n'
+  '💙 <b>Vynexa Stars | دنیای بدون مرز</b>\n'
+  'برای شروع، یکی از گزینه‌های منو رو انتخاب کن.')
+ await up.effective_message.reply_text(welcome,reply_markup=menu(up.effective_user.id),parse_mode=ParseMode.HTML)
 
 async def help_command(up,ctx):
  text=('📘 <b>راهنمای استفاده از Vynexa Stars</b>\n\n'
@@ -135,7 +143,15 @@ async def help_command(up,ctx):
  await up.effective_message.reply_text(text,reply_markup=K([[b('🏠 منوی اصلی','home')]]),parse_mode=ParseMode.HTML,disable_web_page_preview=True)
 
 async def payment_choice(q,p,recipient):
- await edit(q,f'🧾 <b>تأیید سفارش</b>\nمحصول: {p["title"]}\nگیرنده: <code>{recipient}</code>\nمبلغ: <b>{money(p["amount"])}</b>\n\nاگر اطلاعات درسته، روش پرداخت رو انتخاب کن:',K([[b('💳 کارت‌به‌کارت','pay:card','primary')],[b('👛 کیف پول','pay:wallet','success')],[b('✏️ تغییر گیرنده','recipient:other')],[b('❌ لغو','home')]]),ParseMode.HTML)
+ kind_label = 'تلگرام پریمیوم' if p['kind']=='premium' else 'تلگرام استارز'
+ invoice = ('🧾 <b>فاکتور سفارش</b>\n\n'
+  f'🌐 سرویس: {kind_label} ✨\n'
+  f'📦 بسته: {p["title"]}\n'
+  f'🎁 گیرنده: <code>{recipient}</code>\n'
+  f'💰 مبلغ: <b>{money(p["amount"])}</b> 💳\n\n'
+  '🔎 لطفاً فاکتور را بررسی کن.\n\n'
+  '✅ اگر مشخصات و مبلغ درست است، فاکتور را تأیید کن.')
+ await edit(q,invoice,K([[b('✅ تأیید فاکتور','invoice:confirm','success')],[b('✏️ تغییر گیرنده','recipient:other')],[b('❌ لغو سفارش','home')]]),ParseMode.HTML)
 async def cb(up,ctx):
  q=up.callback_query; await q.answer(); u=up.effective_user; ensure(u); d=q.data
  if d=='home': ctx.user_data.pop('product',None); await edit(q,'✨ <b>Vynexa Stars</b>\nچه کاری برات انجام بدم؟',menu(u.id),ParseMode.HTML)
@@ -158,6 +174,16 @@ async def cb(up,ctx):
   if not p or not rec: await edit(q,'اطلاعات سفارش منقضی شده؛ دوباره شروع کن.',menu(u.id)); return
   await payment_choice(q,p,rec)
  elif d=='ourlinks': await edit(q,'🌐 <b>کانال ها و ربات های ما</b>\nیکی از گزینه‌ها رو انتخاب کن:',links_menu(),ParseMode.HTML)
+ elif d=='trust':
+  await edit(q,'🔐 <b>چطور می‌تونی به ما اعتماد کنی؟</b>\n\n'
+   'برای آشنایی بیشتر با فعالیت‌های وینکسا، وارد بخش «کانال‌ها و ربات‌های ما» شو و کانال‌ها و ربات‌های معرفی‌شده رو بررسی کن.\n\n'
+   '💬 اگر سؤالی داشتی، قبل از پرداخت از پشتیبانی بپرس و همیشه مشخصات و مبلغ فاکتور رو با دقت بررسی کن.',
+   K([[b('🌐 کانال‌ها و ربات‌های ما','ourlinks')],[b('📞 پشتیبانی','support')],[b('⬅️ منو','home')]]),ParseMode.HTML)
+ elif d=='invoice:confirm':
+  p=ctx.user_data.get('product'); recipient=ctx.user_data.get('recipient','')
+  if not p or not recipient:
+   await edit(q,'اطلاعات سفارش منقضی شده؛ لطفاً دوباره محصول رو انتخاب کن.',menu(u.id)); return
+  await edit(q,'💳 <b>روش پرداخت رو انتخاب کن</b>',K([[b('💳 کارت‌به‌کارت','pay:card','primary')],[b('👛 کیف پول','pay:wallet','success')],[b('⬅️ بازگشت به فاکتور','recipient:confirm')],[b('❌ لغو سفارش','home')]]),ParseMode.HTML)
  elif d.startswith('pay:'):
   p=ctx.user_data.get('product')
   if not p: await edit(q,'از منو دوباره محصول رو انتخاب کن.',menu(u.id)); return
@@ -334,6 +360,7 @@ async def messages(up,ctx):
 async def auto_react(up,ctx):
  m=up.effective_message; chat=up.effective_chat
  if not m or not chat or chat.type!="private" or (up.effective_user and up.effective_user.is_bot):return
+ logging.info("Auto-reaction handler reached: chat=%s message=%s",chat.id,m.message_id)
  # Use standard Telegram emoji only; custom/premium emoji reactions are not guaranteed for bots.
  choices=["👍","❤️","🔥","🥰","🎉","👏","😍","💯","🤩","😁","😊","🙏","💖","💕","😘","🤗","💪","⭐","🌟","✨","👌","🫶","🤣","❤","💋","😇","😻","💐","🥳"]
  chosen=random.choice(choices)
