@@ -73,7 +73,7 @@ def _fetch_ton_rate():
                 if "." in val and val.count(".")==1 and len(val.split(".")[-1])<=2: val=val.split(".")[0]
                 if val.isdigit() and int(val)>1000:return float(val)
         except Exception as e: logging.warning("TON rate source failed (%s): %s",url,str(e)[:120])
-    logging.warning("TON/IRT rate unavailable from configured SwapWallet sources")
+    logging.error("TON/IRT rate unavailable: both configured SwapWallet sources failed or returned an unrecognized format; prices will remain at their configured base values")
     return None
 async def ton_rate():
     import time
@@ -334,12 +334,15 @@ async def messages(up,ctx):
 async def auto_react(up,ctx):
  m=up.effective_message; chat=up.effective_chat
  if not m or not chat or chat.type!="private" or (up.effective_user and up.effective_user.is_bot):return
- # Telegram Bot API accepts standard emoji reactions only; premium/custom emoji reactions are not available here.
- choices=["❤️","🔥","🥰","🎉","👏","😍","💯","🤩","😁","😊","🙏","💖","💕","😘","🤗","💪","⭐","🌟","✨","👌","🫶","🤣"]
+ # Use standard Telegram emoji only; custom/premium emoji reactions are not guaranteed for bots.
+ choices=["👍","❤️","🔥","🥰","🎉","👏","😍","💯","🤩","😁","😊","🙏","💖","💕","😘","🤗","💪","⭐","🌟","✨","👌","🫶","🤣","❤","💋","😇","😻","💐","🥳"]
+ chosen=random.choice(choices)
  try:
-  await ctx.bot.set_message_reaction(chat_id=chat.id,message_id=m.message_id,reaction=[ReactionTypeEmoji(random.choice(choices))],is_big=False)
- except (TelegramError,AttributeError,TypeError) as e:
-  logging.debug("Private auto-reaction failed: %s",str(e)[:160])
+  await ctx.bot.set_message_reaction(chat_id=chat.id,message_id=m.message_id,reaction=[ReactionTypeEmoji(chosen)],is_big=False)
+  logging.info("Auto-reaction set: chat=%s message=%s emoji=%s",chat.id,m.message_id,chosen)
+ except Exception as e:
+  # Keep the actual Telegram/API reason visible in normal FadeHost logs.
+  logging.warning("Auto-reaction failed: chat=%s message=%s emoji=%s error=%s",chat.id,m.message_id,chosen,str(e)[:300])
 
 async def post_init(app):
  init()
