@@ -37,27 +37,47 @@ def b(text,data,style=None):
  except TypeError:a.pop('style',None);a.pop('icon_custom_emoji_id',None);return B(**a)
 TON_CACHE = {"value": None, "at": 0}
 def _fetch_ton_rate():
-    """Fetch TON price in toman from CoinGecko (IRR is rial; divide by 10)."""
-    urls = [
-        "https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=irr",
-        "https://api.coingecko.com/api/v3/simple/price?ids=toncoin&vs_currencies=irr",
-    ]
+    """Read public TON/IRT price from SwapWallet's public market endpoint/page."""
+    urls = ["https://swapwallet.app/api/v1/market/prices", "https://swapwallet.app/en/prices"]
     for url in urls:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "VynexaStars/2.0", "Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=8) as response:
-                data = json.loads(response.read().decode("utf-8", "ignore"))
-            for coin in ("the-open-network", "toncoin"):
-                value = data.get(coin, {}).get("irr") if isinstance(data, dict) else None
-                if isinstance(value, (int, float)) and value > 10000:
-                    # CoinGecko's IRR quote is rial, while bot prices are in toman.
-                    return float(value) / 10.0
-        except Exception as e:
-            logging.warning("TON price source failed (%s): %s", url, str(e)[:120])
+            req=urllib.request.Request(url, headers={"User-Agent":"Mozilla/5.0 VynexaStars/1.0","Accept":"application/json,text/html,*/*"})
+            with urllib.request.urlopen(req, timeout=7) as response: body=response.read().decode("utf-8","ignore")
+            try:
+                data=json.loads(body)
+                def walk(x):
+                    if isinstance(x,dict):
+                        sym=str(x.get("symbol",x.get("code",x.get("ticker","")))).upper()
+                        name=str(x.get("name",x.get("asset", ""))).upper()
+                        if sym=="TON" or ("TON" in name and "TONCOIN" in name):
+                            for k in ("price_irt","price_irr","irt","price_toman","price","last_price","value"):
+                                v=x.get(k)
+                                if isinstance(v,(int,float)) and v>1000:return float(v)
+                        for v in x.values():
+                            found=walk(v)
+                            if found:return found
+                    elif isinstance(x,list):
+                        for v in x:
+                            found=walk(v)
+                            if found:return found
+                    return None
+                rate=walk(data)
+                if rate:return rate
+            except Exception: pass
+            # Public prices page fallback: isolate TON row and its first IRT amount.
+            plain=re.sub(r"<[^>]+>"," ",body,flags=re.S)
+            plain=re.sub(r"\s+"," ",plain)
+            m=re.search(r"(?:Toncoin|TON)\s*(?:TON)?\s*([0-9][0-9,٬.]*)",plain,re.I)
+            if m:
+                val=m.group(1).replace(",","").replace("٬","")
+                if "." in val and val.count(".")==1 and len(val.split(".")[-1])<=2: val=val.split(".")[0]
+                if val.isdigit() and int(val)>1000:return float(val)
+        except Exception as e: logging.warning("TON rate source failed (%s): %s",url,str(e)[:120])
+    logging.warning("TON/IRT rate unavailable from configured SwapWallet sources")
     return None
 async def ton_rate():
     import time
-    if TON_CACHE["value"] and time.time()-TON_CACHE["at"]<60:return TON_CACHE["value"]
+    if TON_CACHE["value"] and time.time()-TON_CACHE["at"]<300:return TON_CACHE["value"]
     rate=await asyncio.to_thread(_fetch_ton_rate)
     if rate:
         TON_CACHE.update(value=float(rate),at=time.time())
@@ -88,36 +108,10 @@ def links_menu():
  rows.append([b('⬅️ بازگشت','home')]); return K(rows)
 def product_menu(kind):
  data=PREM if kind=='premium' else STARS; labels={'3':'پریمیوم ۳ ماهه','6':'پریمیوم ۶ ماهه','12':'پریمیوم ۱۲ ماهه'}
- rows=[[b(labels.get(k,k+' استارز'),f'product:{kind}:{k}')] for k,v in data.items()]
- if kind=='stars': rows.append([b('🔢 انتخاب تعداد دلخواه','stars:custom','primary')])
- rows.append([b('⬅️ بازگشت','home')])
- return K(rows)
-
-async def custom_stars_price(quantity):
- # Interpolate using current TON-adjusted package prices.
- tiers=[]
- for k in ('50','100','250','500','1000'):
-  price=await current_price('stars',k)
-  if price>0: tiers.append((int(k),price))
- if not tiers: return 0
- if quantity<=tiers[0][0]: return max(1,round(quantity*tiers[0][1]/tiers[0][0]))
- for (q1,p1),(q2,p2) in zip(tiers,tiers[1:]):
-  if q1<=quantity<=q2: return max(1,round(p1+(quantity-q1)*(p2-p1)/(q2-q1)))
- q0,p0=tiers[-1]
- return max(1,round(quantity*p0/q0))
-
-async def react_positive(bot,chat_id,message_id):
- try:
-  await bot.set_message_reaction(chat_id=chat_id,message_id=message_id,reaction=[ReactionTypeEmoji('👍')],is_big=False)
- except (TelegramError,AttributeError,TypeError) as e:
-  logging.info('Reaction unavailable for chat=%s message=%s: %s',chat_id,message_id,str(e)[:160])
+ return K([[b(labels.get(k,k+' استارز'),f'product:{kind}:{k}')] for k,v in data.items()]+[[b('⬅️ بازگشت','home')]])
 async def edit(q,text,markup=None,pm=None):
- try:
-  await q.edit_message_text(text,reply_markup=markup,parse_mode=pm,disable_web_page_preview=True)
-  await react_positive(q.get_bot(),q.message.chat_id,q.message.message_id)
- except TelegramError:
-  sent=await q.message.reply_text(text,reply_markup=markup,parse_mode=pm)
-  await react_positive(q.get_bot(),sent.chat_id,sent.message_id)
+ try: await q.edit_message_text(text,reply_markup=markup,parse_mode=pm,disable_web_page_preview=True)
+ except TelegramError: await q.message.reply_text(text,reply_markup=markup,parse_mode=pm)
 async def notify(ctx,uid,text,markup=None):
  try: await ctx.bot.send_message(uid,text,reply_markup=markup)
  except TelegramError: pass
@@ -125,8 +119,7 @@ async def admins(ctx,text,markup=None):
  for aid in ADMINS: await notify(ctx,aid,text,markup)
 def order_buttons(oid): return K([[b('✅ تأیید پرداخت',f'approve:{oid}','success'),b('❌ رد سفارش',f'reject:{oid}','danger')],[b('🎉 ثبت تحویل',f'delivered:{oid}','primary')]])
 async def start(up,ctx):
- ensure(up.effective_user); sent=await up.effective_message.reply_text('✨ <b>به Vynexa Stars خوش اومدی</b>\n\nدنیای بدون مرز 💙\nاز منو استارز یا پریمیوم سفارش بده.',reply_markup=menu(up.effective_user.id),parse_mode=ParseMode.HTML)
- await react_positive(ctx.bot,sent.chat_id,sent.message_id)
+ ensure(up.effective_user); await up.effective_message.reply_text('✨ <b>به Vynexa Stars خوش اومدی</b>\n\nدنیای بدون مرز 💙\nاز منو استارز یا پریمیوم سفارش بده.',reply_markup=menu(up.effective_user.id),parse_mode=ParseMode.HTML)
 
 async def help_command(up,ctx):
  text=('📘 <b>راهنمای استفاده از Vynexa Stars</b>\n\n'
@@ -147,9 +140,6 @@ async def cb(up,ctx):
  q=up.callback_query; await q.answer(); u=up.effective_user; ensure(u); d=q.data
  if d=='home': ctx.user_data.pop('product',None); await edit(q,'✨ <b>Vynexa Stars</b>\nچه کاری برات انجام بدم؟',menu(u.id),ParseMode.HTML)
  elif d.startswith('buy:'): await edit(q,'بسته موردنظرت رو انتخاب کن:',product_menu(d.split(':')[1]))
- elif d=='stars:custom':
-  ctx.user_data['await_stars_quantity']=True
-  await edit(q,'🔢 <b>انتخاب تعداد دلخواه استارز</b>\n\nتعداد موردنظرت رو به عدد بفرست (مثلاً ۷۵ یا ۳۲۰).\nقیمت به‌صورت خودکار از روی قیمت بسته‌های استارز و نرخ به‌روز TON محاسبه می‌شه.',K([[b('⬅️ بازگشت','buy:stars')]]),ParseMode.HTML)
  elif d.startswith('product:'):
   _,kind,key=d.split(':'); price=await current_price(kind,key)
   if price<=0: await q.answer('قیمت این محصول هنوز تنظیم نشده.',show_alert=True); return
@@ -186,8 +176,8 @@ async def cb(up,ctx):
   with con() as c: rs=c.execute('SELECT id,title,amount,status FROM orders WHERE uid=? ORDER BY id DESC LIMIT 10',(u.id,)).fetchall()
   names={'awaiting_receipt':'در انتظار رسید','paid_pending_delivery':'در انتظار تحویل','delivered':'تحویل‌شده','rejected':'ردشده'}; text='🧾 <b>سفارش‌های من</b>\n\n'+('\n\n'.join(f"#{r['id']} · {r['title']} · {money(r['amount'])}\nوضعیت: {names.get(r['status'],r['status'])}" for r in rs) if rs else 'هنوز سفارشی نداری.')
   await edit(q,text,K([[b('⬅️ منو','home')]]),ParseMode.HTML)
- elif d=='feature:gift': await edit(q,'🎁 <b>گیفت تلگرام</b>\n\n🚧 این قابلیت هنوز آماده نشده است. تیم وینکسا در حال آماده‌سازی آن است؛ به‌محض تکمیل از همین‌جا فعال می‌شود. 💙',K([[b('⬅️ بازگشت به منو','home')]]),ParseMode.HTML)
- elif d=='feature:boost': await edit(q,'🚀 <b>بوست چنل</b>\n\n🚧 این قابلیت هنوز آماده نشده است. پس از تکمیل، از همین‌جا در دسترس قرار می‌گیرد. 💙',K([[b('⬅️ بازگشت به منو','home')]]),ParseMode.HTML)
+ elif d=='feature:gift': await q.answer('🎁 این بخش هنوز آماده نشده است. تیم وینکسا در حال تکمیل این قابلیت است؛ لطفاً بعداً دوباره سر بزن.',show_alert=True)
+ elif d=='feature:boost': await q.answer('🚀 بخش بوست چنل هنوز آماده نشده است. به‌محض تکمیل، از همین‌جا در دسترس قرار می‌گیرد.',show_alert=True)
  elif d=='support': await edit(q,f'📞 پشتیبانی: @{SUPPORT}',K([[b('⬅️ منو','home')]]))
  elif d=='admin':
   if u.id not in ADMINS:return
@@ -270,20 +260,6 @@ async def messages(up,ctx):
  u=up.effective_user
  if not u:return
  ensure(u); m=up.effective_message
- if m.text and ctx.user_data.get('await_stars_quantity'):
-  raw=m.text.strip().replace(',','').replace('٬','').replace('،','').replace(' ','')
-  if not raw.isdigit() or not (1 <= int(raw) <= 10000):
-   await m.reply_text('❌ تعداد معتبر نیست. عددی بین ۱ تا ۱۰٬۰۰۰ بفرست؛ مثلاً ۳۲۰.')
-   return
-  quantity=int(raw); ctx.user_data['await_stars_quantity']=False
-  amount=await custom_stars_price(quantity)
-  if amount<=0:
-   await m.reply_text('❌ قیمت استارز هنوز تنظیم نشده. مدیر باید قیمت بسته‌ها را در پنل وارد کند.',reply_markup=menu(u.id)); return
-  title=f'{quantity} استارز (تعداد دلخواه)'
-  ctx.user_data['product']={'kind':'stars','key':f'custom_{quantity}','title':title,'amount':amount}
-  sent=await m.reply_text(f'⭐ <b>سفارش استارز دلخواه</b>\n\nتعداد: <b>{quantity:,}</b> استارز\nقیمت نهایی: <b>{money(amount)}</b>\n\nقیمت بر اساس بسته‌های تعریف‌شده و نرخ به‌روز TON محاسبه شده است.\nبرای ادامه، گیرنده را انتخاب کن:',reply_markup=K([[b('🙋 برای خودم','recipient:self','success')],[b('🎁 برای شخص دیگر','recipient:other','primary')],[b('🔢 تغییر تعداد','stars:custom')],[b('⬅️ بازگشت به استارز','buy:stars')]]),parse_mode=ParseMode.HTML)
-  await react_positive(ctx.bot,m.chat_id,sent.message_id)
-  return
  if m.text and ctx.user_data.get('await_recipient'):
   rec=m.text.strip(); ctx.user_data['await_recipient']=False
   if not (rec.startswith('@') and len(rec)>1 or rec.isdigit()): ctx.user_data['await_recipient']=True; await m.reply_text('فرمت آیدی درست نیست. @username یا آیدی عددی بفرست.'); return
@@ -358,10 +334,12 @@ async def messages(up,ctx):
 async def auto_react(up,ctx):
  m=up.effective_message; chat=up.effective_chat
  if not m or not chat or chat.type!="private" or (up.effective_user and up.effective_user.is_bot):return
+ # Telegram Bot API accepts standard emoji reactions only; premium/custom emoji reactions are not available here.
+ choices=["❤️","🔥","🥰","🎉","👏","😍","💯","🤩","😁","😊","🙏","💖","💕","😘","🤗","💪","⭐","🌟","✨","👌","🫶","🤣"]
  try:
-  await react_positive(ctx.bot,chat.id,m.message_id)
- except Exception as e:
-  logging.info("Private user-message reaction failed: %s",str(e)[:160])
+  await ctx.bot.set_message_reaction(chat_id=chat.id,message_id=m.message_id,reaction=[ReactionTypeEmoji(random.choice(choices))],is_big=False)
+ except (TelegramError,AttributeError,TypeError) as e:
+  logging.debug("Private auto-reaction failed: %s",str(e)[:160])
 
 async def post_init(app):
  init()
