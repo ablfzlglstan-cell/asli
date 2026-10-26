@@ -13,18 +13,27 @@ logging.basicConfig(level=logging.INFO)
 def now(): return datetime.now(timezone.utc).isoformat()
 def money(n): return f'{int(n):,} {CUR}'
 def con():
- c=sqlite3.connect(DB,timeout=20); c.row_factory=sqlite3.Row; return c
+ c=sqlite3.connect(DB,timeout=8); c.row_factory=sqlite3.Row; c.execute('PRAGMA busy_timeout=8000'); return c
 def init():
  with con() as c:
   c.executescript('''CREATE TABLE IF NOT EXISTS users(uid INTEGER PRIMARY KEY,username TEXT,first_name TEXT,balance INTEGER DEFAULT 0,created TEXT); CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER,kind TEXT,pkey TEXT,title TEXT,amount INTEGER,method TEXT,status TEXT,receipt TEXT,created TEXT, recipient TEXT DEFAULT ''); CREATE TABLE IF NOT EXISTS wallet(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER,amount INTEGER,status TEXT,receipt TEXT,created TEXT); CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);''')
   cols={r['name'] for r in c.execute('PRAGMA table_info(orders)').fetchall()}
   if 'recipient' not in cols: c.execute("ALTER TABLE orders ADD COLUMN recipient TEXT DEFAULT ''")
   for k,v in [('link1_title','کانال وینکسا'),('link1_url','https://t.me/VynexaVPN'),('link2_title','ربات وینکسا'),('link2_url','https://t.me/VynexaVPN_bot'),('link3_title','کانال سوم'),('link3_url','https://t.me/'),('link4_title','ربات چهارم'),('link4_url','https://t.me/'),('emoji_stars','⭐'),('emoji_premium','💎'),('emoji_wallet','👛'),('emoji_orders','🧾'),('emoji_links','🌐'),('emoji_support','📞'),('emoji_admin','🛠')]: c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(k,v))
+# Small in-process cache avoids opening/querying SQLite repeatedly while building menus.
+_SETTINGS_CACHE = {}
 def setting(key, default=''):
+ if key in _SETTINGS_CACHE:
+  return _SETTINGS_CACHE[key]
  with con() as c:
-  r=c.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone(); return r['value'] if r else default
+  r=c.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()
+ value = r['value'] if r else default
+ _SETTINGS_CACHE[key] = value
+ return value
 def set_setting(key,value):
- with con() as c: c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,str(value)))
+ value = str(value)
+ with con() as c: c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,value))
+ _SETTINGS_CACHE[key] = value
 def ensure(u):
  with con() as c: c.execute('INSERT INTO users VALUES(?,?,?,0,?) ON CONFLICT(uid) DO UPDATE SET username=excluded.username,first_name=excluded.first_name',(u.id,u.username or '',u.first_name or '',now()))
 def bal(uid):
@@ -395,5 +404,5 @@ async def post_init(app):
  logging.info('Vynexa Stars started')
 def main():
  if not TOKEN:raise SystemExit('BOT_TOKEN را در Environment Variables هاست تنظیم کن.')
- app=Application.builder().token(TOKEN).post_init(post_init).concurrent_updates(16).connection_pool_size(32).pool_timeout(10).build();app.add_handler(CommandHandler('start',start));app.add_handler(CommandHandler('help',help_command));app.add_handler(CallbackQueryHandler(cb));app.add_handler(MessageHandler(filters.PHOTO|(filters.TEXT&~filters.COMMAND),messages));app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.ALL,auto_react),group=1);app.run_polling(allowed_updates=Update.ALL_TYPES)
+ app=Application.builder().token(TOKEN).post_init(post_init).concurrent_updates(32).connection_pool_size(64).pool_timeout(5).build();app.add_handler(CommandHandler('start',start));app.add_handler(CommandHandler('help',help_command));app.add_handler(CallbackQueryHandler(cb));app.add_handler(MessageHandler(filters.PHOTO|(filters.TEXT&~filters.COMMAND),messages));app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.ALL,auto_react),group=1);app.run_polling(allowed_updates=Update.ALL_TYPES)
 if __name__=='__main__':main()
