@@ -111,7 +111,7 @@ async def current_price(kind,key):
     return max(step, int((raw + step/2)//step)*step)
 
 def menu(uid):
- rows=[[b('🧪 تست','test')],[b(f"{setting('emoji_stars','⭐')} خرید استارز",'buy:stars','success'),b(f"{setting('emoji_premium','💎')} خرید پریمیوم",'buy:premium','primary')],[b(f"{setting('emoji_wallet','👛')} کیف پول",'wallet'),b(f"{setting('emoji_orders','🧾')} سفارش‌های من",'orders')],[b(f"{setting('emoji_links','🌐')} کانال ها و ربات های ما",'ourlinks')],[b('🎁 گیفت تلگرام','feature:gift'),b('🚀 بوست چنل','feature:boost')],[b('🔐 چگونه بهتون اعتماد کنم؟','trust')],[b(f"{setting('emoji_support','📞')} پشتیبانی",'support')]]
+ rows=[[b(f"{setting('emoji_stars','⭐')} خرید استارز",'buy:stars','success'),b(f"{setting('emoji_premium','💎')} خرید پریمیوم",'buy:premium','primary')],[b(f"{setting('emoji_wallet','👛')} کیف پول",'wallet'),b(f"{setting('emoji_orders','🧾')} سفارش‌های من",'orders')],[b(f"{setting('emoji_links','🌐')} کانال ها و ربات های ما",'ourlinks')],[b('🎁 گیفت تلگرام','feature:gift'),b('🚀 بوست چنل','feature:boost')],[b('🔐 چگونه بهتون اعتماد کنم؟','trust')],[b(f"{setting('emoji_support','📞')} پشتیبانی",'support')]]
  if uid in ADMINS: rows.append([b(f"{setting('emoji_admin','🛠')} پنل مدیریت",'admin','danger')])
  return K(rows)
 def links_menu():
@@ -158,18 +158,27 @@ async def help_command(up,ctx):
  await up.effective_message.reply_text(text,reply_markup=K([[b('🏠 منوی اصلی','home')]]),parse_mode=ParseMode.HTML,disable_web_page_preview=True)
 
 async def payment_choice(q,p,recipient):
+ import html, re
  kind_label = 'تلگرام پریمیوم' if p['kind']=='premium' else 'تلگرام استارز'
- invoice = ('🧾 <b>فاکتور سفارش</b>\n\n'
-  f'🌐 سرویس: {kind_label} ✨\n'
-  f'📦 بسته: {p["title"]}\n'
-  f'🎁 گیرنده: <code>{recipient}</code>\n'
-  f'💰 مبلغ: <b>{money(p["amount"])}</b> 💳\n\n'
-  '🔎 لطفاً فاکتور را بررسی کن.\n\n'
+ raw = str(recipient)
+ match = re.search(r'ID:\\s*(\\d+)', raw)
+ numeric_id = match.group(1) if match else (raw.strip() if raw.strip().isdigit() else '')
+ username = re.search(r'@([A-Za-z0-9_]{5,})', raw)
+ username_text = '@' + username.group(1) if username else 'ثبت نشده'
+ id_text = numeric_id if numeric_id else 'در دسترس نیست'
+ invoice = ('🧾 <b>فاکتور سفارش</b>\\n\\n'
+  f'🌐 سرویس: {kind_label} ✨\\n'
+  f'📦 بسته: {html.escape(str(p["title"]))}\\n'
+  f'👤 نام کاربری گیرنده: <code>{html.escape(username_text)}</code>\\n'
+  f'🆔 آیدی عددی گیرنده: <code>{html.escape(id_text)}</code>\\n'
+  f'💰 مبلغ: <b>{money(p["amount"])}</b> 💳\\n\\n'
+  '🔎 لطفاً فاکتور را بررسی کن.\\n\\n'
   '✅ اگر مشخصات و مبلغ درست است، فاکتور را تأیید کن.')
  await edit(q,invoice,K([[b('✅ تأیید فاکتور','invoice:confirm','success')],[b('✏️ تغییر گیرنده','recipient:other')],[b('❌ لغو سفارش','home')]]),ParseMode.HTML)
+
 async def cb(up,ctx):
  q=up.callback_query; await q.answer(); u=up.effective_user; ensure(u); d=q.data
- if d=='home': ctx.user_data.pop('product',None); await edit(q,'✨ <b>Vynexa Stars</b>\nچه کاری برات انجام بدم؟',menu(u.id),ParseMode.HTML)
+ if d=='home': ctx.user_data.pop('product',None); await edit(q,setting('text_menu_prompt','✨ <b>Vynexa Stars</b>\nچه کاری برات انجام بدم؟'),menu(u.id),ParseMode.HTML)
  elif d.startswith('buy:'): await edit(q,'بسته موردنظرت رو انتخاب کن:',product_menu(d.split(':')[1]))
  elif d=='stars:custom':
   ctx.user_data['await_custom_stars']=True
@@ -222,11 +231,11 @@ async def cb(up,ctx):
   await edit(q,text,K([[b('⬅️ منو','home')]]),ParseMode.HTML)
  elif d=='feature:gift': await q.answer('🎁 این بخش هنوز آماده نشده است. تیم وینکسا در حال تکمیل این قابلیت است؛ لطفاً بعداً دوباره سر بزن.',show_alert=True)
  elif d=='feature:boost': await q.answer('🚀 بخش بوست چنل هنوز آماده نشده است. به‌محض تکمیل، از همین‌جا در دسترس قرار می‌گیرد.',show_alert=True)
- elif d=='support': await edit(q,f'📞 پشتیبانی: @{SUPPORT}',K([[b('⬅️ منو','home')]]))
+ elif d=='support': await edit(q,setting('text_support_prompt',f'📞 پشتیبانی: @{SUPPORT}'),K([[b('⬅️ منو','home')]]))
  elif d=='admin':
   if u.id not in ADMINS:return
   with con() as c: n=c.execute("SELECT COUNT(*) n FROM orders WHERE status IN ('awaiting_receipt','paid_pending_delivery')").fetchone()['n']; w=c.execute("SELECT COUNT(*) n FROM wallet WHERE status='pending'").fetchone()['n']
-  await edit(q,f'🛠 <b>پنل مدیریت</b>\nسفارش‌های در انتظار: {n}\nدرخواست‌های کیف پول: {w}',K([[b('📋 سفارش‌های در انتظار','adm:orders')],[b('👛 درخواست‌های کیف پول','adm:wallets')],[b('💰 ویرایش قیمت','adm:price')],[b('🌐 تنظیم کانال‌ها و ربات‌ها','adm:links')],[b('🎨 تغییر ایموجی دکمه‌ها','adm:emoji')],[b('⬅️ منو','home')]]),ParseMode.HTML)
+  await edit(q,f'🛠 <b>پنل مدیریت</b>\nسفارش‌های در انتظار: {n}\nدرخواست‌های کیف پول: {w}',K([[b('📋 سفارش‌های در انتظار','adm:orders')],[b('👛 درخواست‌های کیف پول','adm:wallets')],[b('💰 ویرایش قیمت','adm:price')],[b('🌐 تنظیم کانال‌ها و ربات‌ها','adm:links')],[b('🎨 تغییر ایموجی دکمه‌ها','adm:emoji')],[b('📝 ویرایش متن‌ها','adm:texts')],[b('⬅️ منو','home')]]),ParseMode.HTML)
  elif d=='adm:price':
   if u.id not in ADMINS:return
   ctx.user_data.pop('admin_setting_mode',None)
@@ -262,6 +271,10 @@ async def cb(up,ctx):
  elif d=='adm:links':
   if u.id not in ADMINS:return
   ctx.user_data['admin_setting_mode']='links'; await edit(q,'برای تغییر هر لینک، یک خط با قالب زیر بفرست (چهار لینک قابل تنظیم است):\n1|عنوان|https://t.me/example\n2|عنوان|https://t.me/example\n3|عنوان|https://t.me/example\n4|عنوان|https://t.me/example',K([[b('⬅️ پنل','admin')]]))
+ elif d=='adm:texts':
+  if u.id not in ADMINS:return
+  ctx.user_data['admin_setting_mode']='texts'
+  await edit(q,'📝 ویرایش متن‌ها\n\nهر مورد را در یک خط با قالب key=متن بفرست.\nکلیدها: menu_prompt و support_prompt\nبرای خط جدید داخل متن از | استفاده کن.',K([[b('⬅️ پنل','admin')]]))
  elif d=='adm:emoji':
   if u.id not in ADMINS:return
   ctx.user_data['admin_setting_mode']='emoji'; await edit(q,'برای تغییر ایموجی‌ها یک خط برای هر مورد بفرست، مثل:\nstars=✨\npremium=👑\nwallet=💰\norders=📦\nlinks=🌐\nsupport=💬\nadmin=⚙️',K([[b('⬅️ پنل','admin')]]))
@@ -347,6 +360,13 @@ async def messages(up,ctx):
      parts=line.split('|',2)
      if len(parts)==3 and parts[0].strip() in ('1','2','3','4') and parts[2].strip().startswith(('https://','http://','tg://')):
       i=parts[0].strip(); set_setting('link'+i+'_title',parts[1].strip()[:60]); set_setting('link'+i+'_url',parts[2].strip()); ok+=1
+   elif mode=='texts':
+    mp={'menu_prompt':'text_menu_prompt','support_prompt':'text_support_prompt'}
+    for line in lines:
+     if '=' not in line: continue
+     key,val=line.split('=',1); key=key.strip(); val=val.strip().replace('|','\n')
+     if key in mp and val:
+      set_setting(mp[key],val[:3000]); ok+=1
    elif mode=='emoji':
     mp={'stars':'emoji_stars','premium':'emoji_premium','wallet':'emoji_wallet','orders':'emoji_orders','links':'emoji_links','support':'emoji_support','admin':'emoji_admin'}
     for line in lines:
