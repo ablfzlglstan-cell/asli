@@ -158,27 +158,29 @@ async def help_command(up,ctx):
  await up.effective_message.reply_text(text,reply_markup=K([[b('🏠 منوی اصلی','home')]]),parse_mode=ParseMode.HTML,disable_web_page_preview=True)
 
 async def payment_choice(q,p,recipient):
- import html, re
  kind_label = 'تلگرام پریمیوم' if p['kind']=='premium' else 'تلگرام استارز'
- raw = str(recipient)
- match = re.search(r'ID:\\s*(\\d+)', raw)
- numeric_id = match.group(1) if match else (raw.strip() if raw.strip().isdigit() else '')
- username = re.search(r'@([A-Za-z0-9_]{5,})', raw)
- username_text = '@' + username.group(1) if username else 'ثبت نشده'
- id_text = numeric_id if numeric_id else 'در دسترس نیست'
- invoice = ('🧾 <b>فاکتور سفارش</b>\\n\\n'
-  f'🌐 سرویس: {kind_label} ✨\\n'
-  f'📦 بسته: {html.escape(str(p["title"]))}\\n'
-  f'👤 نام کاربری گیرنده: <code>{html.escape(username_text)}</code>\\n'
-  f'🆔 آیدی عددی گیرنده: <code>{html.escape(id_text)}</code>\\n'
-  f'💰 مبلغ: <b>{money(p["amount"])}</b> 💳\\n\\n'
-  '🔎 لطفاً فاکتور را بررسی کن.\\n\\n'
-  '✅ اگر مشخصات و مبلغ درست است، فاکتور را تأیید کن.')
+ raw = str(recipient or '').strip()
+ username_match = re.search(r'@[\w\d_]+', raw)
+ id_match = re.search(r'ID:\s*(\d+)', raw, re.I)
+ username = username_match.group(0) if username_match else ''
+ numeric_id = id_match.group(1) if id_match else ''
+ if not username and raw.startswith('ID:'):
+  numeric_id = re.sub(r'\D', '', raw)
+ invoice = (
+  '🧾 <b>فاکتور سفارش</b>\n\n'
+  f'🌐 سرویس: {kind_label} ✨\n'
+  f'📦 بسته: {p["title"]}\n'
+  f'👤 نام کاربری گیرنده: {username or "ثبت نشده"}\n'
+  f'🆔 آیدی عددی گیرنده: {numeric_id or "در دسترس نیست"}\n'
+  f'💰 مبلغ: <b>{money(p["amount"])}</b> تومان 💳\n\n'
+  '🔎 لطفاً فاکتور را بررسی کن.\n\n'
+  '✅ اگر مشخصات و مبلغ درست است، فاکتور را تأیید کن.'
+ )
  await edit(q,invoice,K([[b('✅ تأیید فاکتور','invoice:confirm','success')],[b('✏️ تغییر گیرنده','recipient:other')],[b('❌ لغو سفارش','home')]]),ParseMode.HTML)
 
 async def cb(up,ctx):
  q=up.callback_query; await q.answer(); u=up.effective_user; ensure(u); d=q.data
- if d=='home': ctx.user_data.pop('product',None); await edit(q,setting('text_menu_prompt','✨ <b>Vynexa Stars</b>\nچه کاری برات انجام بدم؟'),menu(u.id),ParseMode.HTML)
+ if d=='home': ctx.user_data.pop('product',None); await edit(q,setting('text_menu_prompt',f'✨ <b>Vynexa Stars</b>\n{setting("text_menu_prompt", "چه کاری برات انجام بدم؟")}'),menu(u.id),ParseMode.HTML)
  elif d.startswith('buy:'): await edit(q,'بسته موردنظرت رو انتخاب کن:',product_menu(d.split(':')[1]))
  elif d=='stars:custom':
   ctx.user_data['await_custom_stars']=True
@@ -272,9 +274,7 @@ async def cb(up,ctx):
   if u.id not in ADMINS:return
   ctx.user_data['admin_setting_mode']='links'; await edit(q,'برای تغییر هر لینک، یک خط با قالب زیر بفرست (چهار لینک قابل تنظیم است):\n1|عنوان|https://t.me/example\n2|عنوان|https://t.me/example\n3|عنوان|https://t.me/example\n4|عنوان|https://t.me/example',K([[b('⬅️ پنل','admin')]]))
  elif d=='adm:texts':
-  if u.id not in ADMINS:return
-  ctx.user_data['admin_setting_mode']='texts'
-  await edit(q,'📝 ویرایش متن‌ها\n\nهر مورد را در یک خط با قالب key=متن بفرست.\nکلیدها: menu_prompt و support_prompt\nبرای خط جدید داخل متن از | استفاده کن.',K([[b('⬅️ پنل','admin')]]))
+  await edit(q,'📝 <b>ویرایش متن‌ها</b>\nمتن موردنظر را انتخاب کن:',K([[b('🏠 متن منوی اصلی','adm:textedit:menu_prompt')],[b('📞 متن پشتیبانی','adm:textedit:support_prompt')],[b('⬅️ بازگشت','admin')]]),ParseMode.HTML)
  elif d=='adm:emoji':
   if u.id not in ADMINS:return
   ctx.user_data['admin_setting_mode']='emoji'; await edit(q,'برای تغییر ایموجی‌ها یک خط برای هر مورد بفرست، مثل:\nstars=✨\npremium=👑\nwallet=💰\norders=📦\nlinks=🌐\nsupport=💬\nadmin=⚙️',K([[b('⬅️ پنل','admin')]]))
@@ -343,6 +343,12 @@ async def messages(up,ctx):
   ctx.user_data['pending_price_amount']=amount
   title=ctx.user_data.get('pending_price_title','محصول')
   await m.reply_text(f'🔎 <b>تأیید قیمت جدید</b>\n\nمحصول: {title}\nقیمت جدید: <b>{money(amount)}</b>\n\nذخیره بشه؟',reply_markup=K([[b('✅ تأیید و ذخیره','adm:priceconfirm','success')],[b('✏️ وارد کردن دوباره','adm:pricepick:'+ctx.user_data['pending_price_key'])],[b('❌ لغو','adm:pricecancel','danger')]]),parse_mode=ParseMode.HTML)
+  return
+ if m.text and ctx.user_data.get('admin_setting_mode') in ('text_edit_menu_prompt','text_edit_support_prompt') and u.id in ADMINS:
+  mode=ctx.user_data.pop('admin_setting_mode')
+  key='text_menu_prompt' if mode=='text_edit_menu_prompt' else 'text_support_prompt'
+  set_setting(key,m.text.strip())
+  await m.reply_text('✅ متن ذخیره شد.',reply_markup=menu(u.id))
   return
  if m.text and ctx.user_data.get('admin_setting_mode') and u.id in ADMINS:
   mode=ctx.user_data.pop('admin_setting_mode'); lines=m.text.splitlines(); ok=0
