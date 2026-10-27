@@ -109,6 +109,7 @@ async def current_price(kind,key):
 
 def menu(uid):
  rows=[[b(f"{setting('emoji_stars','⭐')} خرید استارز",'buy:stars','success'),b(f"{setting('emoji_premium','💎')} خرید پریمیوم",'buy:premium','primary')],[b(f"{setting('emoji_wallet','👛')} کیف پول",'wallet'),b(f"{setting('emoji_orders','🧾')} سفارش‌های من",'orders')],[b(f"{setting('emoji_links','🌐')} کانال ها و ربات های ما",'ourlinks')],[b('🎁 گیفت تلگرام','feature:gift'),b('🚀 بوست چنل','feature:boost')],[b('🔐 چگونه بهتون اعتماد کنم؟','trust')],[b(f"{setting('emoji_support','📞')} پشتیبانی",'support')]]
+ rows.append([b('🧪 تست','test')])
  if uid in ADMINS: rows.append([b(f"{setting('emoji_admin','🛠')} پنل مدیریت",'admin','danger')])
  return K(rows)
 def links_menu():
@@ -165,6 +166,11 @@ async def payment_choice(q,p,recipient):
   '✅ اگر مشخصات و مبلغ درست است، فاکتور را تأیید کن.')
  await edit(q,invoice,K([[b('✅ تأیید فاکتور','invoice:confirm','success')],[b('✏️ تغییر گیرنده','recipient:other')],[b('❌ لغو سفارش','home')]]),ParseMode.HTML)
 async def cb(up,ctx):
+ q=up.callback_query
+ if q and q.data=='test':
+  await q.answer()
+  await edit(q,'✅ دکمه تست با موفقیت کار می‌کند.',K([[b('🏠 منوی اصلی','home')]]))
+  return
  q=up.callback_query; await q.answer(); u=up.effective_user; ensure(u); d=q.data
  if d=='home': ctx.user_data.pop('product',None); await edit(q,'✨ <b>Vynexa Stars</b>\nچه کاری برات انجام بدم؟',menu(u.id),ParseMode.HTML)
  elif d.startswith('buy:'): await edit(q,'بسته موردنظرت رو انتخاب کن:',product_menu(d.split(':')[1]))
