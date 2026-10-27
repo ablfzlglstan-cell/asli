@@ -13,18 +13,27 @@ logging.basicConfig(level=logging.INFO)
 def now(): return datetime.now(timezone.utc).isoformat()
 def money(n): return f'{int(n):,} {CUR}'
 def con():
- c=sqlite3.connect(DB,timeout=20); c.row_factory=sqlite3.Row; return c
+ c=sqlite3.connect(DB,timeout=8); c.row_factory=sqlite3.Row; c.execute('PRAGMA busy_timeout=8000'); return c
 def init():
  with con() as c:
   c.executescript('''CREATE TABLE IF NOT EXISTS users(uid INTEGER PRIMARY KEY,username TEXT,first_name TEXT,balance INTEGER DEFAULT 0,created TEXT); CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER,kind TEXT,pkey TEXT,title TEXT,amount INTEGER,method TEXT,status TEXT,receipt TEXT,created TEXT, recipient TEXT DEFAULT ''); CREATE TABLE IF NOT EXISTS wallet(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER,amount INTEGER,status TEXT,receipt TEXT,created TEXT); CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);''')
   cols={r['name'] for r in c.execute('PRAGMA table_info(orders)').fetchall()}
   if 'recipient' not in cols: c.execute("ALTER TABLE orders ADD COLUMN recipient TEXT DEFAULT ''")
   for k,v in [('link1_title','کانال وینکسا'),('link1_url','https://t.me/VynexaVPN'),('link2_title','ربات وینکسا'),('link2_url','https://t.me/VynexaVPN_bot'),('link3_title','کانال سوم'),('link3_url','https://t.me/'),('link4_title','ربات چهارم'),('link4_url','https://t.me/'),('emoji_stars','⭐'),('emoji_premium','💎'),('emoji_wallet','👛'),('emoji_orders','🧾'),('emoji_links','🌐'),('emoji_support','📞'),('emoji_admin','🛠')]: c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(k,v))
+# Small in-process cache avoids opening/querying SQLite repeatedly while building menus.
+_SETTINGS_CACHE = {}
 def setting(key, default=''):
+ if key in _SETTINGS_CACHE:
+  return _SETTINGS_CACHE[key]
  with con() as c:
-  r=c.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone(); return r['value'] if r else default
+  r=c.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()
+ value = r['value'] if r else default
+ _SETTINGS_CACHE[key] = value
+ return value
 def set_setting(key,value):
- with con() as c: c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,str(value)))
+ value = str(value)
+ with con() as c: c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,value))
+ _SETTINGS_CACHE[key] = value
 def ensure(u):
  with con() as c: c.execute('INSERT INTO users VALUES(?,?,?,0,?) ON CONFLICT(uid) DO UPDATE SET username=excluded.username,first_name=excluded.first_name',(u.id,u.username or '',u.first_name or '',now()))
 def bal(uid):
@@ -73,7 +82,7 @@ def _fetch_ton_rate():
                 if "." in val and val.count(".")==1 and len(val.split(".")[-1])<=2: val=val.split(".")[0]
                 if val.isdigit() and int(val)>1000:return float(val)
         except Exception as e: logging.warning("TON rate source failed (%s): %s",url,str(e)[:120])
-    logging.warning("TON/IRT rate unavailable from configured SwapWallet sources")
+    logging.error("TON/IRT rate unavailable: both configured SwapWallet sources failed or returned an unrecognized format; prices will remain at their configured base values")
     return None
 async def ton_rate():
     import time
@@ -88,20 +97,21 @@ async def ton_rate():
                     rk=f"ton_ref_{kind}_{key}"
                     c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",(rk,str(rate)))
     return rate
-PRICE_STEP = 100_000  # Round TON-linked prices to the nearest 100,000 toman.
 async def current_price(kind,key):
     base=(PREM if kind=="premium" else STARS)[key]
     rate=await ton_rate()
     if not rate:return base
     ref=float(setting(f"ton_ref_{kind}_{key}",str(rate)) or rate)
     if ref<=0:return base
-    raw=base*rate/ref
-    # Keep the displayed price stable between round-number thresholds:
-    # 4,818,061 -> 4,800,000; 4,850,000 -> 4,900,000.
-    return max(PRICE_STEP, int((raw + PRICE_STEP/2)//PRICE_STEP)*PRICE_STEP)
+    # Price floor: a TON price drop never lowers the configured product price.
+    # Only a rise above the reference rate can increase the customer price.
+    raw=max(base, round(base*rate/ref))
+    # نمایش قیمت‌های وابسته به TON با گام ۱۰۰٬۰۰۰ تومان؛ تغییر فقط هنگام عبور از نیمه گام بعدی.
+    step=100_000
+    return max(step, int((raw + step/2)//step)*step)
 
 def menu(uid):
- rows=[[b(f"{setting('emoji_stars','⭐')} خرید استارز",'buy:stars','success'),b(f"{setting('emoji_premium','💎')} خرید پریمیوم",'buy:premium','primary')],[b(f"{setting('emoji_wallet','👛')} کیف پول",'wallet'),b(f"{setting('emoji_orders','🧾')} سفارش‌های من",'orders')],[b(f"{setting('emoji_links','🌐')} کانال ها و ربات های ما",'ourlinks')],[b('🎁 گیفت تلگرام','feature:gift'),b('🚀 بوست چنل','feature:boost')],[b(f"{setting('emoji_support','📞')} پشتیبانی",'support')]]
+ rows=[[b(f"{setting('emoji_stars','⭐')} خرید استارز",'buy:stars','success'),b(f"{setting('emoji_premium','💎')} خرید پریمیوم",'buy:premium','primary')],[b(f"{setting('emoji_wallet','👛')} کیف پول",'wallet'),b(f"{setting('emoji_orders','🧾')} سفارش‌های من",'orders')],[b(f"{setting('emoji_links','🌐')} کانال ها و ربات های ما",'ourlinks')],[b('🎁 گیفت تلگرام','feature:gift'),b('🚀 بوست چنل','feature:boost')],[b('🔐 چگونه بهتون اعتماد کنم؟','trust')],[b(f"{setting('emoji_support','📞')} پشتیبانی",'support')]]
  if uid in ADMINS: rows.append([b(f"{setting('emoji_admin','🛠')} پنل مدیریت",'admin','danger')])
  return K(rows)
 def links_menu():
@@ -112,7 +122,10 @@ def links_menu():
  rows.append([b('⬅️ بازگشت','home')]); return K(rows)
 def product_menu(kind):
  data=PREM if kind=='premium' else STARS; labels={'3':'پریمیوم ۳ ماهه','6':'پریمیوم ۶ ماهه','12':'پریمیوم ۱۲ ماهه'}
- return K([[b(labels.get(k,k+' استارز'),f'product:{kind}:{k}')] for k,v in data.items()]+[[b('⬅️ بازگشت','home')]])
+ rows=[[b(labels.get(k,k+' استارز'),f'product:{kind}:{k}')] for k,v in data.items()]
+ if kind=='stars': rows.append([b('✨ استارز دلخواه','stars:custom')])
+ rows.append([b('⬅️ بازگشت','home')])
+ return K(rows)
 async def edit(q,text,markup=None,pm=None):
  try: await q.edit_message_text(text,reply_markup=markup,parse_mode=pm,disable_web_page_preview=True)
  except TelegramError: await q.message.reply_text(text,reply_markup=markup,parse_mode=pm)
@@ -123,7 +136,13 @@ async def admins(ctx,text,markup=None):
  for aid in ADMINS: await notify(ctx,aid,text,markup)
 def order_buttons(oid): return K([[b('✅ تأیید پرداخت',f'approve:{oid}','success'),b('❌ رد سفارش',f'reject:{oid}','danger')],[b('🎉 ثبت تحویل',f'delivered:{oid}','primary')]])
 async def start(up,ctx):
- ensure(up.effective_user); await up.effective_message.reply_text('✨ <b>به Vynexa Stars خوش اومدی</b>\n\nدنیای بدون مرز 💙\nاز منو استارز یا پریمیوم سفارش بده.',reply_markup=menu(up.effective_user.id),parse_mode=ParseMode.HTML)
+ ensure(up.effective_user)
+ welcome = ('✨ <b>به Vynexa Stars خوش اومدی!</b>\n\n'
+  'اینجا می‌تونی بسته‌های استارز و تلگرام پریمیوم رو بررسی کنی و سفارشت رو ثبت کنی.\n'
+  'قبل از پرداخت، فاکتور و مبلغ نهایی بهت نمایش داده می‌شه تا با خیال راحت بررسیش کنی.\n\n'
+  '💙 <b>Vynexa Stars | دنیای بدون مرز</b>\n'
+  'برای شروع، یکی از گزینه‌های منو رو انتخاب کن.')
+ await up.effective_message.reply_text(welcome,reply_markup=menu(up.effective_user.id),parse_mode=ParseMode.HTML)
 
 async def help_command(up,ctx):
  text=('📘 <b>راهنمای استفاده از Vynexa Stars</b>\n\n'
@@ -139,11 +158,22 @@ async def help_command(up,ctx):
  await up.effective_message.reply_text(text,reply_markup=K([[b('🏠 منوی اصلی','home')]]),parse_mode=ParseMode.HTML,disable_web_page_preview=True)
 
 async def payment_choice(q,p,recipient):
- await edit(q,f'🧾 <b>تأیید سفارش</b>\nمحصول: {p["title"]}\nگیرنده: <code>{recipient}</code>\nمبلغ: <b>{money(p["amount"])}</b>\n\nاگر اطلاعات درسته، روش پرداخت رو انتخاب کن:',K([[b('💳 کارت‌به‌کارت','pay:card','primary')],[b('👛 کیف پول','pay:wallet','success')],[b('✏️ تغییر گیرنده','recipient:other')],[b('❌ لغو','home')]]),ParseMode.HTML)
+ kind_label = 'تلگرام پریمیوم' if p['kind']=='premium' else 'تلگرام استارز'
+ invoice = ('🧾 <b>فاکتور سفارش</b>\n\n'
+  f'🌐 سرویس: {kind_label} ✨\n'
+  f'📦 بسته: {p["title"]}\n'
+  f'🎁 گیرنده: <code>{recipient}</code>\n'
+  f'💰 مبلغ: <b>{money(p["amount"])}</b> 💳\n\n'
+  '🔎 لطفاً فاکتور را بررسی کن.\n\n'
+  '✅ اگر مشخصات و مبلغ درست است، فاکتور را تأیید کن.')
+ await edit(q,invoice,K([[b('✅ تأیید فاکتور','invoice:confirm','success')],[b('✏️ تغییر گیرنده','recipient:other')],[b('❌ لغو سفارش','home')]]),ParseMode.HTML)
 async def cb(up,ctx):
  q=up.callback_query; await q.answer(); u=up.effective_user; ensure(u); d=q.data
  if d=='home': ctx.user_data.pop('product',None); await edit(q,'✨ <b>Vynexa Stars</b>\nچه کاری برات انجام بدم؟',menu(u.id),ParseMode.HTML)
  elif d.startswith('buy:'): await edit(q,'بسته موردنظرت رو انتخاب کن:',product_menu(d.split(':')[1]))
+ elif d=='stars:custom':
+  ctx.user_data['await_custom_stars']=True
+  await edit(q,'✨ تعداد استارز دلخواهت رو به عدد بفرست (مثلاً 175).',K([[b('⬅️ بازگشت','buy:stars')]]))
  elif d.startswith('product:'):
   _,kind,key=d.split(':'); price=await current_price(kind,key)
   if price<=0: await q.answer('قیمت این محصول هنوز تنظیم نشده.',show_alert=True); return
@@ -162,6 +192,16 @@ async def cb(up,ctx):
   if not p or not rec: await edit(q,'اطلاعات سفارش منقضی شده؛ دوباره شروع کن.',menu(u.id)); return
   await payment_choice(q,p,rec)
  elif d=='ourlinks': await edit(q,'🌐 <b>کانال ها و ربات های ما</b>\nیکی از گزینه‌ها رو انتخاب کن:',links_menu(),ParseMode.HTML)
+ elif d=='trust':
+  await edit(q,'🔐 <b>چطور می‌تونی به ما اعتماد کنی؟</b>\n\n'
+   'برای آشنایی بیشتر با فعالیت‌های وینکسا، وارد بخش «کانال‌ها و ربات‌های ما» شو و کانال‌ها و ربات‌های معرفی‌شده رو بررسی کن.\n\n'
+   '💬 اگر سؤالی داشتی، قبل از پرداخت از پشتیبانی بپرس و همیشه مشخصات و مبلغ فاکتور رو با دقت بررسی کن.',
+   K([[b('🌐 کانال‌ها و ربات‌های ما','ourlinks')],[b('📞 پشتیبانی','support')],[b('⬅️ منو','home')]]),ParseMode.HTML)
+ elif d=='invoice:confirm':
+  p=ctx.user_data.get('product'); recipient=ctx.user_data.get('recipient','')
+  if not p or not recipient:
+   await edit(q,'اطلاعات سفارش منقضی شده؛ لطفاً دوباره محصول رو انتخاب کن.',menu(u.id)); return
+  await edit(q,'💳 <b>روش پرداخت رو انتخاب کن</b>',K([[b('💳 کارت‌به‌کارت','pay:card','primary')],[b('👛 کیف پول','pay:wallet','success')],[b('⬅️ بازگشت به فاکتور','recipient:confirm')],[b('❌ لغو سفارش','home')]]),ParseMode.HTML)
  elif d.startswith('pay:'):
   p=ctx.user_data.get('product')
   if not p: await edit(q,'از منو دوباره محصول رو انتخاب کن.',menu(u.id)); return
@@ -264,6 +304,17 @@ async def messages(up,ctx):
  u=up.effective_user
  if not u:return
  ensure(u); m=up.effective_message
+ if m.text and ctx.user_data.get('await_custom_stars'):
+  raw=m.text.replace(',','').replace('٬','').replace('،','').strip()
+  if not raw.isdigit() or not (50 <= int(raw) <= 100000):
+   await m.reply_text('تعداد معتبر وارد کن؛ حداقل 50 و حداکثر 100000 است.')
+   return
+  count=int(raw); ctx.user_data['await_custom_stars']=False
+  unit=await current_price('stars','1000')/1000
+  amount=max(1,round(unit*count))
+  ctx.user_data['product']={'kind':'stars','key':'custom_'+str(count),'title':f'{count:,} استارز دلخواه','amount':amount}
+  await m.reply_text(f'✨ تعداد انتخاب‌شده: {count:,} استارز\n💰 مبلغ: {money(amount)}\n\nبرای ادامه گیرنده رو انتخاب کن:',reply_markup=K([[b('🙋 برای خودم','recipient:self','success')],[b('🎁 برای شخص دیگر','recipient:other','primary')],[b('⬅️ بازگشت','buy:stars')]]))
+  return
  if m.text and ctx.user_data.get('await_recipient'):
   rec=m.text.strip(); ctx.user_data['await_recipient']=False
   if not (rec.startswith('@') and len(rec)>1 or rec.isdigit()): ctx.user_data['await_recipient']=True; await m.reply_text('فرمت آیدی درست نیست. @username یا آیدی عددی بفرست.'); return
@@ -337,13 +388,15 @@ async def messages(up,ctx):
  elif m.text:await m.reply_text('برای دیدن منو /start رو بزن.',reply_markup=menu(u.id))
 async def auto_react(up,ctx):
  m=up.effective_message; chat=up.effective_chat
- if not m or not chat or chat.type!="private" or (up.effective_user and up.effective_user.is_bot):return
- # Telegram Bot API accepts standard emoji reactions only; premium/custom emoji reactions are not available here.
- choices=["❤️","🔥","🥰","🎉","👏","😍","💯","🤩","😁","😊","🙏","💖","💕","😘","🤗","💪","⭐","🌟","✨","👌","🫶","🤣"]
+ if not m or not chat or chat.type!="private" or (up.effective_user and up.effective_user.is_bot): return
+ # Telegram bots are limited to one reaction per message; choose from standard emoji.
+ choices=["❤️","🔥","🥰","🎉","👏","😍","💯","🤩","😁","😊","🙏","💖","💕","🤗","💪","⭐","🌟","✨","👌","🫶","🤣","👍","🥳"]
+ chosen=random.choice(choices)
  try:
-  await ctx.bot.set_message_reaction(chat_id=chat.id,message_id=m.message_id,reaction=[ReactionTypeEmoji(random.choice(choices))],is_big=False)
- except (TelegramError,AttributeError,TypeError) as e:
-  logging.debug("Private auto-reaction failed: %s",str(e)[:160])
+  await ctx.bot.set_message_reaction(chat_id=chat.id,message_id=m.message_id,reaction=[ReactionTypeEmoji(emoji=chosen)],is_big=False)
+  logging.info("Auto-reaction set: chat=%s message=%s emoji=%s",chat.id,m.message_id,chosen)
+ except Exception as e:
+  logging.warning("Auto-reaction failed: chat=%s message=%s emoji=%s error=%s",chat.id,m.message_id,chosen,str(e)[:300])
 
 async def post_init(app):
  init()
@@ -354,5 +407,5 @@ async def post_init(app):
  logging.info('Vynexa Stars started')
 def main():
  if not TOKEN:raise SystemExit('BOT_TOKEN را در Environment Variables هاست تنظیم کن.')
- app=Application.builder().token(TOKEN).post_init(post_init).concurrent_updates(16).connection_pool_size(32).pool_timeout(10).build();app.add_handler(CommandHandler('start',start));app.add_handler(CommandHandler('help',help_command));app.add_handler(CallbackQueryHandler(cb));app.add_handler(MessageHandler(filters.PHOTO|(filters.TEXT&~filters.COMMAND),messages));app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.ALL,auto_react),group=1);app.run_polling(allowed_updates=Update.ALL_TYPES)
+ app=Application.builder().token(TOKEN).post_init(post_init).concurrent_updates(32).connection_pool_size(64).pool_timeout(5).build();app.add_handler(CommandHandler('start',start));app.add_handler(CommandHandler('help',help_command));app.add_handler(CallbackQueryHandler(cb));app.add_handler(MessageHandler(filters.PHOTO|(filters.TEXT&~filters.COMMAND),messages));app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.ALL,auto_react),group=1);app.run_polling(allowed_updates=Update.ALL_TYPES)
 if __name__=='__main__':main()
