@@ -19,7 +19,7 @@ def init():
   c.executescript('''CREATE TABLE IF NOT EXISTS users(uid INTEGER PRIMARY KEY,username TEXT,first_name TEXT,balance INTEGER DEFAULT 0,created TEXT); CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER,kind TEXT,pkey TEXT,title TEXT,amount INTEGER,method TEXT,status TEXT,receipt TEXT,created TEXT, recipient TEXT DEFAULT ''); CREATE TABLE IF NOT EXISTS wallet(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER,amount INTEGER,status TEXT,receipt TEXT,created TEXT); CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);''')
   cols={r['name'] for r in c.execute('PRAGMA table_info(orders)').fetchall()}
   if 'recipient' not in cols: c.execute("ALTER TABLE orders ADD COLUMN recipient TEXT DEFAULT ''")
-  for k,v in [('link1_title','کانال وینکسا'),('link1_url','https://t.me/VynexaVPN'),('link2_title','ربات وینکسا'),('link2_url','https://t.me/VynexaVPN_bot'),('link3_title','کانال سوم'),('link3_url','https://t.me/'),('link4_title','ربات چهارم'),('link4_url','https://t.me/'),('emoji_stars','⭐'),('emoji_premium','💎'),('emoji_wallet','👛'),('emoji_orders','🧾'),('emoji_links','🌐'),('emoji_support','📞'),('emoji_admin','🛠'),('text_welcome',''),('text_help',''),('text_trust',''),('text_gift',''),('text_boost','')]: c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(k,v))
+  for k,v in [('link1_title','کانال وینکسا'),('link1_url','https://t.me/VynexaVPN'),('link2_title','ربات وینکسا'),('link2_url','https://t.me/VynexaVPN_bot'),('link3_title','کانال سوم'),('link3_url','https://t.me/'),('link4_title','ربات چهارم'),('link4_url','https://t.me/'),('emoji_stars','⭐'),('emoji_premium','💎'),('emoji_wallet','👛'),('emoji_orders','🧾'),('emoji_links','🌐'),('emoji_support','📞'),('emoji_admin','🛠'),('text_welcome',''),('text_help',''),('text_trust',''),('text_gift',''),('text_boost',''),('text_rules',''),('text_buyguide',''),('bot_enabled','1')]: c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(k,v))
 # Small in-process cache avoids opening/querying SQLite repeatedly while building menus.
 _SETTINGS_CACHE = {}
 def setting(key, default=''):
@@ -34,6 +34,8 @@ def set_setting(key,value):
  value = str(value)
  with con() as c: c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,value))
  _SETTINGS_CACHE[key] = value
+def bot_enabled():
+ return setting('bot_enabled','1').strip().lower() not in {'0','false','off','no'}
 def ensure(u):
  with con() as c: c.execute('INSERT INTO users VALUES(?,?,?,0,?) ON CONFLICT(uid) DO UPDATE SET username=excluded.username,first_name=excluded.first_name',(u.id,u.username or '',u.first_name or '',now()))
 def bal(uid):
@@ -43,7 +45,7 @@ def bal(uid):
 COLOR_BUTTONS = [
  ('buy:stars','خرید استارز'), ('buy:premium','خرید پریمیوم'), ('wallet','کیف پول'),
  ('orders','سفارش‌های من'), ('ourlinks','کانال‌ها و ربات‌های ما'), ('feature:gift','گیفت تلگرام'),
- ('feature:boost','بوست چنل'), ('trust','چگونه بهتون اعتماد کنم؟'), ('support','پشتیبانی'),
+ ('feature:boost','بوست چنل'), ('trust','چگونه بهتون اعتماد کنم؟'), ('rules','قوانین خرید'), ('buyguide','راهنمای خرید'), ('support','پشتیبانی'),
  ('admin','پنل مدیریت'), ('product_item','بسته‌های محصول (همه محصولات)'), ('stars:custom','استارز دلخواه'),
  ('recipient:self','برای خودم'), ('recipient:other','برای شخص دیگر'), ('recipient:confirm','تأیید گیرنده'),
  ('invoice:confirm','تأیید فاکتور'), ('pay:card','پرداخت کارت‌به‌کارت'), ('pay:wallet','پرداخت با کیف پول'),
@@ -58,7 +60,7 @@ COLOR_BUTTONS = [
  ('adm:order','باز کردن سفارش'), ('approve','تأیید پرداخت سفارش'), ('reject','رد سفارش'),
  ('delivered','ثبت تحویل سفارش'), ('walletok','تأیید و شارژ کیف پول'), ('walletno','رد درخواست کیف پول'),
  ('adm:colorpage','صفحه‌بندی فهرست رنگ‌ها'), ('adm:colorpick','انتخاب دکمه برای تغییر رنگ'),
- ('adm:colorset','انتخاب رنگ'), ('cancel','لغو / انصراف'),
+ ('adm:colorset','انتخاب رنگ'), ('adm:togglebot','روشن/خاموش کردن ربات'), ('cancel','لغو / انصراف'),
 ]
 
 def button_color_key(data):
@@ -133,10 +135,11 @@ def _fetch_ton_rate():
     return None
 async def ton_rate():
     import time
-    if TON_CACHE["value"] and time.time()-TON_CACHE["at"]<300:return TON_CACHE["value"]
+    if TON_CACHE["at"] and time.time()-TON_CACHE["at"] < (300 if TON_CACHE["value"] else 60):
+        return TON_CACHE["value"]
     rate=await asyncio.to_thread(_fetch_ton_rate)
+    TON_CACHE.update(value=float(rate) if rate else None, at=time.time())
     if rate:
-        TON_CACHE.update(value=float(rate),at=time.time())
         # Initialize reference rates for existing admin prices once, so they remain the baseline.
         with con() as c:
             for kind, prices in (("premium",PREM),("stars",STARS)):
@@ -145,20 +148,19 @@ async def ton_rate():
                     c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",(rk,str(rate)))
     return rate
 async def current_price(kind,key):
-    base=(PREM if kind=="premium" else STARS)[key]
+    base=(PREM if kind=="premium" else STARS).get(key,0)
+    if base<=0:return 0
     rate=await ton_rate()
     if not rate:return base
     ref=float(setting(f"ton_ref_{kind}_{key}",str(rate)) or rate)
-    if ref<=0:return base
-    # Price floor: a TON price drop never lowers the configured product price.
-    # Only a rise above the reference rate can increase the customer price.
+    if ref<=0 or rate<=ref:return base
+    # قیمت تنظیم‌شدهٔ مدیر در نرخ مرجع دقیق می‌ماند؛ فقط رشد نرخ TON قیمت را بالا می‌برد.
     raw=max(base, round(base*rate/ref))
-    # نمایش قیمت‌های وابسته به TON با گام ۱۰۰٬۰۰۰ تومان؛ تغییر فقط هنگام عبور از نیمه گام بعدی.
     step=100_000
-    return max(step, int((raw + step/2)//step)*step)
+    return max(base, int((raw + step/2)//step)*step)
 
 def menu(uid):
- rows=[[b(f"{setting('emoji_stars','⭐')} خرید استارز",'buy:stars','success'),b(f"{setting('emoji_premium','💎')} خرید پریمیوم",'buy:premium','primary')],[b(f"{setting('emoji_wallet','👛')} کیف پول",'wallet'),b(f"{setting('emoji_orders','🧾')} سفارش‌های من",'orders')],[b(f"{setting('emoji_links','🌐')} کانال ها و ربات های ما",'ourlinks')],[b('🎁 گیفت تلگرام','feature:gift'),b('🚀 بوست چنل','feature:boost')],[b('🔐 چگونه بهتون اعتماد کنم؟','trust')],[b(f"{setting('emoji_support','📞')} پشتیبانی",'support')]]
+ rows=[[b(f"{setting('emoji_stars','⭐')} خرید استارز",'buy:stars','success'),b(f"{setting('emoji_premium','💎')} خرید پریمیوم",'buy:premium','primary')],[b(f"{setting('emoji_wallet','👛')} کیف پول",'wallet'),b(f"{setting('emoji_orders','🧾')} سفارش‌های من",'orders')],[b(f"{setting('emoji_links','🌐')} کانال ها و ربات های ما",'ourlinks')],[b('🎁 گیفت تلگرام','feature:gift'),b('🚀 بوست چنل','feature:boost')],[b('🔐 چگونه بهتون اعتماد کنم؟','trust')],[b('📜 قوانین خرید','rules')],[b('🧭 راهنمای خرید','buyguide')],[b(f"{setting('emoji_support','📞')} پشتیبانی",'support')]]
  if uid in ADMINS: rows.append([b(f"{setting('emoji_admin','🛠')} پنل مدیریت",'admin','danger')])
  return K(rows)
 def links_menu():
@@ -184,6 +186,8 @@ async def admins(ctx,text,markup=None):
 def order_buttons(oid): return K([[b('✅ تأیید پرداخت',f'approve:{oid}','success'),b('❌ رد سفارش',f'reject:{oid}','danger')],[b('🎉 ثبت تحویل',f'delivered:{oid}','primary')]])
 async def start(up,ctx):
  ensure(up.effective_user)
+ if not bot_enabled() and up.effective_user.id not in ADMINS:
+  return await up.effective_message.reply_text('🔴 ربات فعلاً خاموش است. لطفاً بعداً دوباره مراجعه کن.')
  welcome = setting('text_welcome','') or ('✨ <b>به Vynexa Stars خوش اومدی!</b>\n\n'
   'اینجا می‌تونی بسته‌های استارز و تلگرام پریمیوم رو بررسی کنی و سفارشت رو ثبت کنی.\n'
   'قبل از پرداخت، فاکتور و مبلغ نهایی بهت نمایش داده می‌شه تا با خیال راحت بررسیش کنی.\n\n'
@@ -192,7 +196,7 @@ async def start(up,ctx):
  await up.effective_message.reply_text(welcome,reply_markup=menu(up.effective_user.id),parse_mode=ParseMode.HTML)
 
 async def help_command(up,ctx):
- text=('📘 <b>راهنمای استفاده از Vynexa Stars</b>\n\n'
+ text=setting('text_help','').strip() or ('📘 <b>راهنمای استفاده از Vynexa Stars</b>\n\n'
        '⭐ <b>خرید استارز:</b> وارد این بخش شو، بسته موردنظر را انتخاب کن و قیمت را ببین.\n\n'
        '💎 <b>خرید پریمیوم:</b> مدت ۳، ۶ یا ۱۲ ماه را انتخاب کن؛ قیمت پس از انتخاب محصول نمایش داده می‌شود.\n\n'
        '🙋 <b>برای خودم:</b> سفارش برای حساب خودت ثبت می‌شود.\n'
@@ -213,11 +217,13 @@ async def payment_choice(q,p,recipient):
  numeric_id = id_match.group(1) if id_match else ''
  if not username and raw.startswith('ID:'):
   numeric_id = re.sub(r'\D', '', raw)
+ elif not username and raw.isdigit():
+  numeric_id = raw
  invoice = (
   '🧾 <b>فاکتور سفارش</b>\n\n'
   f'🌐 سرویس: {kind_label} ✨\n'
   f'📦 بسته: {html.escape(str(p["title"]))}\n'
-  f'👤 گیرنده: {html.escape(username or "ثبت نشده")}\n'
+  f'👤 گیرنده: {html.escape(username or ("آیدی عددی" if numeric_id else "ثبت نشده"))}\n'
   f'🆔 آیدی عددی: {html.escape(numeric_id or "در دسترس نیست")}\n'
   f'💰 مبلغ: <b>{money(p["amount"])}</b> 💳\n\n'
   '🔎 لطفاً فاکتور را بررسی کن.\n\n'
@@ -226,7 +232,10 @@ async def payment_choice(q,p,recipient):
  await edit(q,invoice,K([[b('✅ تأیید فاکتور','invoice:confirm','success')],[b('✏️ تغییر گیرنده','recipient:other')],[b('❌ لغو سفارش','home')]]),ParseMode.HTML)
 
 async def cb(up,ctx):
- q=up.callback_query; await q.answer(); u=up.effective_user; ensure(u); d=q.data
+ q=up.callback_query; u=up.effective_user; ensure(u); d=q.data
+ if not bot_enabled() and u.id not in ADMINS and d not in ('home',):
+  await q.answer('🔴 ربات فعلاً خاموش است.',show_alert=True); return
+ await q.answer()
  if d=='home': ctx.user_data.pop('product',None); await edit(q,setting('text_menu_prompt','✨ <b>Vynexa Stars</b>\nچه کاری برات انجام بدم؟'),menu(u.id),ParseMode.HTML)
  elif d.startswith('buy:'): await edit(q,'بسته موردنظرت رو انتخاب کن:',product_menu(d.split(':')[1]))
  elif d=='stars:custom':
@@ -234,7 +243,7 @@ async def cb(up,ctx):
   await edit(q,'✨ تعداد استارز دلخواهت رو به عدد بفرست (مثلاً 175).',K([[b('⬅️ بازگشت','buy:stars')]]))
  elif d.startswith('product:'):
   _,kind,key=d.split(':'); price=await current_price(kind,key)
-  if price<=0: await q.answer('قیمت این محصول هنوز تنظیم نشده.',show_alert=True); return
+  if price<=0: await edit(q,'⚠️ قیمت این محصول هنوز تنظیم نشده است. لطفاً بعداً دوباره بررسی کن.',K([[b('⬅️ بازگشت','home')]])); return
   title=({'3':'پریمیوم ۳ ماهه','6':'پریمیوم ۶ ماهه','12':'پریمیوم ۱۲ ماهه'}[key] if kind=='premium' else key+' استارز'); ctx.user_data['product']={'kind':kind,'key':key,'title':title,'amount':price}
   await edit(q,f'🎯 <b>برای چه کسی سفارش می‌دی؟</b>\n\nمحصول: {title}\nمبلغ: <b>{money(price)}</b>',K([[b('🙋 برای خودم','recipient:self','success')],[b('🎁 برای شخص دیگر','recipient:other','primary')],[b('⬅️ بازگشت','buy:'+kind)]]),ParseMode.HTML)
  elif d=='recipient:self':
@@ -281,10 +290,22 @@ async def cb(up,ctx):
  elif d=='feature:gift': await edit(q,setting('text_gift','🎁 این بخش هنوز آماده نشده است. تیم وینکسا در حال تکمیل این قابلیت است؛ لطفاً بعداً دوباره سر بزن.'),K([[b('⬅️ منو','home')]]),ParseMode.HTML)
  elif d=='feature:boost': await edit(q,setting('text_boost','🚀 بخش بوست چنل هنوز آماده نشده است. به‌محض تکمیل، از همین‌جا در دسترس قرار می‌گیرد.'),K([[b('⬅️ منو','home')]]),ParseMode.HTML)
  elif d=='support': await edit(q,setting('text_support_prompt',f'📞 پشتیبانی: @{SUPPORT}'),K([[b('⬅️ منو','home')]]),ParseMode.HTML)
+ elif d=='rules':
+  text=setting('text_rules','') or ('📜 <b>قوانین خرید</b>\n\n• قبل از پرداخت، نام محصول، گیرنده و مبلغ فاکتور را بررسی کن.\n• ثبت رسید به‌معنای تأیید خودکار پرداخت نیست؛ سفارش پس از بررسی مدیر پردازش می‌شود.\n• برای خرید شخص دیگر، آیدی را دقیق وارد کن؛ ربات نمی‌تواند اطلاعات خصوصی حساب را بررسی کند.\n• زمان تحویل ممکن است به بررسی پرداخت و شرایط سرویس بستگی داشته باشد.\n• اگر اشتباهی در سفارش یا پرداخت رخ داد، با پشتیبانی تماس بگیر.')
+  await edit(q,text,K([[b('📞 پشتیبانی','support')],[b('⬅️ منو','home')]]),ParseMode.HTML)
+ elif d=='buyguide':
+  text=setting('text_buyguide','') or ('🧭 <b>راهنمای خرید</b>\n\n۱. استارز یا پریمیوم را انتخاب کن.\n۲. بسته و گیرنده را مشخص کن.\n۳. فاکتور را بررسی و تأیید کن.\n۴. روش پرداخت را انتخاب کن.\n۵. در پرداخت کارت‌به‌کارت، رسید را ارسال کن و وضعیت سفارش را از «سفارش‌های من» پیگیری کن.\n۶. در صورت نیاز از پشتیبانی کمک بگیر.')
+  await edit(q,text,K([[b('🛍 شروع خرید','buy:stars')],[b('📞 پشتیبانی','support')],[b('⬅️ منو','home')]]),ParseMode.HTML)
+ elif d=='adm:togglebot':
+  if u.id not in ADMINS: return
+  set_setting('bot_enabled','0' if bot_enabled() else '1')
+  await edit(q,'🟢 ربات روشن شد.' if bot_enabled() else '🔴 ربات خاموش شد.',K([[b('⬅️ پنل مدیریت','admin')],[b('🏠 منو','home')]]))
  elif d=='admin':
   if u.id not in ADMINS:return
   with con() as c: n=c.execute("SELECT COUNT(*) n FROM orders WHERE status IN ('awaiting_receipt','paid_pending_delivery')").fetchone()['n']; w=c.execute("SELECT COUNT(*) n FROM wallet WHERE status='pending'").fetchone()['n']
-  await edit(q,f'🛠 <b>پنل مدیریت</b>\nسفارش‌های در انتظار: {n}\nدرخواست‌های کیف پول: {w}',K([[b('📋 سفارش‌های در انتظار','adm:orders')],[b('👛 درخواست‌های کیف پول','adm:wallets')],[b('💰 ویرایش قیمت','adm:price')],[b('🌐 تنظیم کانال‌ها و ربات‌ها','adm:links')],[b('🎨 تغییر ایموجی دکمه‌ها','adm:emoji')],[b('📝 ویرایش متن‌ها','adm:texts')],[b('🖌 ادیت رنگ‌ها','adm:colors')],[b('⬅️ منو','home')]]),ParseMode.HTML)
+  status='🟢 روشن' if bot_enabled() else '🔴 خاموش'
+  toggle_label='🔴 خاموش کردن ربات' if bot_enabled() else '🟢 روشن کردن ربات'
+  await edit(q,f'🛠 <b>پنل مدیریت</b>\nوضعیت ربات: {status}\nسفارش‌های در انتظار: {n}\nدرخواست‌های کیف پول: {w}',K([[b('📋 سفارش‌های در انتظار','adm:orders')],[b('👛 درخواست‌های کیف پول','adm:wallets')],[b('💰 ویرایش قیمت','adm:price')],[b('🌐 تنظیم کانال‌ها و ربات‌ها','adm:links')],[b('🎨 تغییر ایموجی دکمه‌ها','adm:emoji')],[b('📝 ویرایش متن‌ها','adm:texts')],[b('🖌 ادیت رنگ‌ها','adm:colors')],[b(toggle_label,'adm:togglebot','danger' if bot_enabled() else 'success')],[b('⬅️ منو','home')]]),ParseMode.HTML)
  elif d=='adm:colors':
   if u.id not in ADMINS:return
   ctx.user_data.pop('admin_setting_mode',None)
@@ -362,7 +383,7 @@ async def cb(up,ctx):
   ctx.user_data['admin_setting_mode']='links'; await edit(q,'برای تغییر هر لینک، یک خط با قالب زیر بفرست (چهار لینک قابل تنظیم است):\n1|عنوان|https://t.me/example\n2|عنوان|https://t.me/example\n3|عنوان|https://t.me/example\n4|عنوان|https://t.me/example',K([[b('⬅️ پنل','admin')]]))
  elif d=='adm:texts':
   if u.id not in ADMINS:return
-  text_items=[('menu_prompt','🏠 متن منوی اصلی'),('welcome','👋 پیام شروع'),('help','📘 راهنما'),('support_prompt','📞 متن پشتیبانی'),('trust','🔐 متن اعتمادسازی'),('gift','🎁 متن گیفت'),('boost','🚀 متن بوست')]
+  text_items=[('menu_prompt','🏠 متن منوی اصلی'),('welcome','👋 پیام شروع'),('help','📘 راهنما'),('support_prompt','📞 متن پشتیبانی'),('trust','🔐 متن اعتمادسازی'),('gift','🎁 متن گیفت'),('boost','🚀 متن بوست'),('rules','📜 قوانین خرید'),('buyguide','🧭 راهنمای خرید')]
   await edit(q,'📝 <b>ویرایش متن‌ها</b>\nیکی از متن‌ها رو انتخاب کن. ایموجی پریمیوم هم داخل متن پشتیبانی می‌شه.',K([[b(label,'adm:textedit:'+key)] for key,label in text_items]+[[b('⬅️ بازگشت','admin')]]),ParseMode.HTML)
  elif d.startswith('adm:textedit:'):
   if u.id not in ADMINS:return
@@ -403,9 +424,16 @@ async def cb(up,ctx):
   action,oid_s=d.split(':'); oid=int(oid_s)
   with con() as c: r=c.execute('SELECT * FROM orders WHERE id=?',(oid,)).fetchone()
   if not r:return
+  allowed={'approve':{'awaiting_receipt'},'reject':{'awaiting_receipt','paid_pending_delivery'},'delivered':{'paid_pending_delivery'}}
+  if r['status'] not in allowed[action] or (action=='approve' and not r['receipt']):
+   message='⚠️ برای تأیید پرداخت، اول باید رسید سفارش دریافت شود.' if action=='approve' and not r['receipt'] else '⚠️ این سفارش قبلاً بررسی شده یا وضعیتش اجازه این کار را نمی‌دهد.'
+   await edit(q,message,K([[b('⬅️ پنل','admin')]])); return
   status={'approve':'paid_pending_delivery','reject':'rejected','delivered':'delivered'}[action]
-  with con() as c:c.execute('UPDATE orders SET status=? WHERE id=?',(status,oid))
-  await notify(ctx,r['uid'],{'approve':f'پرداخت سفارش #{oid} تأیید شد؛ سفارش در صف تحویل است.','reject':f'سفارش #{oid} رد شد؛ برای پیگیری با پشتیبانی تماس بگیر.','delivered':f'🎉 سفارش #{oid} تحویل‌شده ثبت شد.'}[action]); await edit(q,{'approve':'پرداخت تأیید شد.','reject':'سفارش رد شد.','delivered':'تحویل ثبت شد.'}[action],K([[b('⬅️ پنل','admin')]]))
+  with con() as c:
+   c.execute('UPDATE orders SET status=? WHERE id=? AND status=?',(status,oid,r['status']))
+   if action=='reject' and r['method']=='wallet' and r['status']=='paid_pending_delivery':
+    c.execute('UPDATE users SET balance=balance+? WHERE uid=?',(r['amount'],r['uid']))
+  await notify(ctx,r['uid'],{'approve':f'پرداخت سفارش #{oid} تأیید شد؛ سفارش در صف تحویل است.','reject':f'سفارش #{oid} رد شد؛'+(' مبلغ به کیف پولت برگشت داده شد. ' if r['method']=='wallet' and r['status']=='paid_pending_delivery' else ' ')+'برای پیگیری با پشتیبانی تماس بگیر.','delivered':f'🎉 سفارش #{oid} تحویل‌شده ثبت شد.'}[action]); await edit(q,{'approve':'پرداخت تأیید شد.','reject':'سفارش رد شد.','delivered':'تحویل ثبت شد.'}[action],K([[b('⬅️ پنل','admin')]]))
  elif d=='adm:wallets':
   if u.id not in ADMINS:return
   with con() as c: rs=c.execute("SELECT id,uid,amount FROM wallet WHERE status='pending' ORDER BY id DESC LIMIT 20").fetchall()
@@ -419,22 +447,35 @@ async def cb(up,ctx):
   if u.id not in ADMINS:return
   action,rid_s=d.split(':'); rid=int(rid_s)
   with con() as c:r=c.execute('SELECT * FROM wallet WHERE id=?',(rid,)).fetchone()
-  if not r or r['status']!='pending':await q.answer('قبلاً بررسی شده.',show_alert=True);return
+  if not r or r['status']!='pending': await edit(q,'این درخواست قبلاً بررسی شده است.',K([[b('⬅️ پنل','admin')]])); return
   with con() as c:
-   c.execute('UPDATE wallet SET status=? WHERE id=?',('approved' if action=='walletok' else 'rejected',rid))
+   changed=c.execute("UPDATE wallet SET status=? WHERE id=? AND status='pending'",('approved' if action=='walletok' else 'rejected',rid)).rowcount
+   if not changed:
+    await edit(q,'این درخواست قبلاً بررسی شده است.',K([[b('⬅️ پنل','admin')]])); return
    if action=='walletok':c.execute('UPDATE users SET balance=balance+? WHERE uid=?',(r['amount'],r['uid']))
   await notify(ctx,r['uid'],'✅ کیف پولت شارژ شد.' if action=='walletok' else '⚠️ درخواست افزایش موجودی رد شد.'); await edit(q,'درخواست بررسی شد.',K([[b('⬅️ پنل','admin')]]))
 async def messages(up,ctx):
  u=up.effective_user
  if not u:return
  ensure(u); m=up.effective_message
+ if not bot_enabled() and u.id not in ADMINS:
+  await m.reply_text('🔴 ربات فعلاً خاموش است. لطفاً بعداً دوباره مراجعه کن.')
+  return
  if m.text and ctx.user_data.get('await_custom_stars'):
   raw=m.text.replace(',','').replace('٬','').replace('،','').strip()
   if not raw.isdigit() or not (50 <= int(raw) <= 100000):
    await m.reply_text('تعداد معتبر وارد کن؛ حداقل 50 و حداکثر 100000 است.')
    return
-  count=int(raw); ctx.user_data['await_custom_stars']=False
-  unit=await current_price('stars','1000')/1000
+  count=int(raw)
+  available=[]
+  for package_key in ('50','100','250','500','1000'):
+   package_price=await current_price('stars',package_key)
+   if package_price>0: available.append(package_price/int(package_key))
+  if not available:
+   await m.reply_text('⚠️ قیمت بسته‌های استارز هنوز تنظیم نشده؛ لطفاً بعداً تلاش کن یا با پشتیبانی تماس بگیر.')
+   return
+  ctx.user_data['await_custom_stars']=False
+  unit=min(available)
   amount=max(1,round(unit*count))
   ctx.user_data['product']={'kind':'stars','key':'custom_'+str(count),'title':f'{count:,} استارز دلخواه','amount':amount}
   await m.reply_text(f'✨ تعداد انتخاب‌شده: {count:,} استارز\n💰 مبلغ: {money(amount)}\n\nبرای ادامه گیرنده رو انتخاب کن:',reply_markup=K([[b('🙋 برای خودم','recipient:self','success')],[b('🎁 برای شخص دیگر','recipient:other','primary')],[b('⬅️ بازگشت','buy:stars')]]))
@@ -458,7 +499,7 @@ async def messages(up,ctx):
  if m.text and ctx.user_data.get('admin_setting_mode','').startswith('text_edit_') and u.id in ADMINS:
   mode=ctx.user_data.pop('admin_setting_mode')
   key=ctx.user_data.pop('admin_text_key',mode[len('text_edit_'):])
-  setting_keys={'menu_prompt':'text_menu_prompt','welcome':'text_welcome','help':'text_help','support_prompt':'text_support_prompt','trust':'text_trust','gift':'text_gift','boost':'text_boost'}
+  setting_keys={'menu_prompt':'text_menu_prompt','welcome':'text_welcome','help':'text_help','support_prompt':'text_support_prompt','trust':'text_trust','gift':'text_gift','boost':'text_boost','rules':'text_rules','buyguide':'text_buyguide'}
   rich_text=(m.text_html or m.text).strip()
   if key in setting_keys:
    set_setting(setting_keys[key],rich_text[:8000])
