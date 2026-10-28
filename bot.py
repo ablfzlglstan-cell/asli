@@ -39,7 +39,39 @@ def ensure(u):
 def bal(uid):
  with con() as c:
   r=c.execute('SELECT balance FROM users WHERE uid=?',(uid,)).fetchone(); return r['balance'] if r else 0
+# Button-color editor: Telegram supports four button styles (default, primary, success, danger).
+COLOR_BUTTONS = [
+ ('buy:stars','خرید استارز'), ('buy:premium','خرید پریمیوم'), ('wallet','کیف پول'),
+ ('orders','سفارش‌های من'), ('ourlinks','کانال‌ها و ربات‌های ما'), ('feature:gift','گیفت تلگرام'),
+ ('feature:boost','بوست چنل'), ('trust','چگونه بهتون اعتماد کنم؟'), ('support','پشتیبانی'),
+ ('admin','پنل مدیریت'), ('product_item','بسته‌های محصول (همه محصولات)'), ('stars:custom','استارز دلخواه'),
+ ('recipient:self','برای خودم'), ('recipient:other','برای شخص دیگر'), ('recipient:confirm','تأیید گیرنده'),
+ ('invoice:confirm','تأیید فاکتور'), ('pay:card','پرداخت کارت‌به‌کارت'), ('pay:wallet','پرداخت با کیف پول'),
+ ('wallet:add','افزایش موجودی'), ('home','بازگشت به منو'), ('link1','لینک شماره ۱'), ('link2','لینک شماره ۲'),
+ ('link3','لینک شماره ۳'), ('link4','لینک شماره ۴'), ('adm:orders','سفارش‌های در انتظار'),
+ ('adm:wallets','درخواست‌های کیف پول'), ('adm:price','ویرایش قیمت'), ('adm:links','تنظیم کانال‌ها و ربات‌ها'),
+ ('adm:emoji','تغییر ایموجی دکمه‌ها'), ('adm:texts','ویرایش متن‌ها'), ('adm:colors','ادیت رنگ‌ها'),
+ ('adm:pricepick','انتخاب محصول برای قیمت'), ('adm:priceconfirm','تأیید و ذخیره قیمت'),
+ ('adm:pricecancel','لغو تغییر قیمت'), ('adm:links_back','بازگشت از تنظیم لینک‌ها'),
+ ('adm:textedit','انتخاب متن برای ویرایش'), ('adm:textcancel','لغو ویرایش متن'),
+ ('adm:emojipick','انتخاب ایموجی'), ('adm:emojicancel','لغو تغییر ایموجی'),
+ ('adm:order','باز کردن سفارش'), ('approve','تأیید پرداخت سفارش'), ('reject','رد سفارش'),
+ ('delivered','ثبت تحویل سفارش'), ('walletok','تأیید و شارژ کیف پول'), ('walletno','رد درخواست کیف پول'),
+ ('adm:colorpage','صفحه‌بندی فهرست رنگ‌ها'), ('adm:colorpick','انتخاب دکمه برای تغییر رنگ'),
+ ('adm:colorset','انتخاب رنگ'), ('cancel','لغو / انصراف'),
+]
+
+def button_color_key(data):
+ if data.startswith('product:'): return 'product_item'
+ for prefix,key in (('adm:pricepick:','adm:pricepick'),('adm:textedit:','adm:textedit'),('adm:emojipick:','adm:emojipick'),('adm:order:','adm:order'),('adm:wallet:','adm:wallet'),('adm:colorpage:','adm:colorpage'),('adm:colorpick:','adm:colorpick'),('approve:','approve'),('reject:','reject'),('delivered:','delivered'),('walletok:','walletok'),('walletno:','walletno')):
+  if data.startswith(prefix): return key
+ if data in ('adm:pricecancel','adm:textcancel','adm:emojicancel'): return data
+ return data
+
 def b(text,data,style=None):
+ color = setting('button_color_' + button_color_key(data), '')
+ if color:
+  style = None if color == 'default' else color
  a={'text':str(text),'callback_data':data}
  match=re.search(r'<tg-emoji\s+emoji-id=["\'](\d+)["\']>(.*?)</tg-emoji>',a['text'],re.S)
  if match:
@@ -51,6 +83,14 @@ def b(text,data,style=None):
   a.pop('style',None);a.pop('icon_custom_emoji_id',None)
   a['text']=re.sub(r'<tg-emoji\s+emoji-id=["\']\d+["\']>(.*?)</tg-emoji>',r'\1',a['text'],flags=re.S)
   return B(**a)
+def url_button(text,url,key):
+ color=setting('button_color_'+key,'')
+ style=None if not color or color=='default' else color
+ args={'text':str(text),'url':url}
+ if style: args['style']=style
+ try: return B(**args)
+ except (TypeError,ValueError):
+  args.pop('style',None); return B(**args)
 TON_CACHE = {"value": None, "at": 0}
 def _fetch_ton_rate():
     """Read public TON/IRT price from SwapWallet's public market endpoint/page."""
@@ -125,7 +165,7 @@ def links_menu():
  rows=[]
  for i in range(1,5):
   title=setting(f'link{i}_title',f'لینک {i}'); url=setting(f'link{i}_url','')
-  if url and url.startswith(('https://','http://','tg://')): rows.append([B(text=title,url=url)])
+  if url and url.startswith(('https://','http://','tg://')): rows.append([url_button(title,url,f'link{i}')])
  rows.append([b('⬅️ بازگشت','home')]); return K(rows)
 def product_menu(kind):
  data=PREM if kind=='premium' else STARS; labels={'3':'پریمیوم ۳ ماهه','6':'پریمیوم ۶ ماهه','12':'پریمیوم ۱۲ ماهه'}
@@ -244,7 +284,47 @@ async def cb(up,ctx):
  elif d=='admin':
   if u.id not in ADMINS:return
   with con() as c: n=c.execute("SELECT COUNT(*) n FROM orders WHERE status IN ('awaiting_receipt','paid_pending_delivery')").fetchone()['n']; w=c.execute("SELECT COUNT(*) n FROM wallet WHERE status='pending'").fetchone()['n']
-  await edit(q,f'🛠 <b>پنل مدیریت</b>\nسفارش‌های در انتظار: {n}\nدرخواست‌های کیف پول: {w}',K([[b('📋 سفارش‌های در انتظار','adm:orders')],[b('👛 درخواست‌های کیف پول','adm:wallets')],[b('💰 ویرایش قیمت','adm:price')],[b('🌐 تنظیم کانال‌ها و ربات‌ها','adm:links')],[b('🎨 تغییر ایموجی دکمه‌ها','adm:emoji')],[b('📝 ویرایش متن‌ها','adm:texts')],[b('⬅️ منو','home')]]),ParseMode.HTML)
+  await edit(q,f'🛠 <b>پنل مدیریت</b>\nسفارش‌های در انتظار: {n}\nدرخواست‌های کیف پول: {w}',K([[b('📋 سفارش‌های در انتظار','adm:orders')],[b('👛 درخواست‌های کیف پول','adm:wallets')],[b('💰 ویرایش قیمت','adm:price')],[b('🌐 تنظیم کانال‌ها و ربات‌ها','adm:links')],[b('🎨 تغییر ایموجی دکمه‌ها','adm:emoji')],[b('📝 ویرایش متن‌ها','adm:texts')],[b('🖌 ادیت رنگ‌ها','adm:colors')],[b('⬅️ منو','home')]]),ParseMode.HTML)
+ elif d=='adm:colors':
+  if u.id not in ADMINS:return
+  ctx.user_data.pop('admin_setting_mode',None)
+  page=0; per_page=8
+  pages=(len(COLOR_BUTTONS)+per_page-1)//per_page
+  rows=[[b(label,'adm:colorpick:'+key)] for key,label in COLOR_BUTTONS[:per_page]]
+  rows.append([b('➡️ صفحه بعد','adm:colorpage:1')] if pages>1 else [b('⬅️ پنل مدیریت','admin')])
+  if pages>1: rows.append([b('⬅️ پنل مدیریت','admin')])
+  await edit(q,f'🖌 <b>ادیت رنگ‌ها</b>\n\nدکمهٔ موردنظرت رو انتخاب کن. هر مورد رنگ جداگانه دارد؛ دکمه‌های تکراری با همان عملکرد هم‌رنگ می‌شوند.\nصفحهٔ ۱ از {pages}',K(rows),ParseMode.HTML)
+ elif d.startswith('adm:colorpage:'):
+  if u.id not in ADMINS:return
+  page=int(d.rsplit(':',1)[1]); per_page=8; pages=(len(COLOR_BUTTONS)+per_page-1)//per_page
+  page=max(0,min(page,pages-1)); start=page*per_page
+  rows=[[b(label,'adm:colorpick:'+key)] for key,label in COLOR_BUTTONS[start:start+per_page]]
+  nav=[]
+  if page>0: nav.append(b('⬅️ قبلی',f'adm:colorpage:{page-1}'))
+  if page<pages-1: nav.append(b('➡️ بعدی',f'adm:colorpage:{page+1}'))
+  if nav: rows.append(nav)
+  rows.append([b('⬅️ پنل مدیریت','admin')])
+  await edit(q,f'🖌 <b>ادیت رنگ‌ها</b>\n\nصفحهٔ {page+1} از {pages} — دکمه‌ای که می‌خوای تغییر بدی انتخاب کن:',K(rows),ParseMode.HTML)
+ elif d.startswith('adm:colorpick:'):
+  if u.id not in ADMINS:return
+  key=d[len('adm:colorpick:'):]
+  item=next((x for x in COLOR_BUTTONS if x[0]==key),None)
+  if not item:return
+  current=setting('button_color_'+key,'default') or 'default'
+  names={'default':'⚪ پیش‌فرض','primary':'🔵 آبی','success':'🟢 سبز','danger':'🔴 قرمز'}
+  rows=[[b(names[color],f'adm:colorset:{key}:{color}',None if color=='default' else color)] for color in ('default','primary','success','danger')]
+  rows.append([b('⬅️ بازگشت به فهرست','adm:colors')])
+  await edit(q,f'🎨 <b>رنگ دکمه: {item[1]}</b>\nرنگ فعلی: {names.get(current,current)}\n\nرنگ جدید رو انتخاب کن:',K(rows),ParseMode.HTML)
+ elif d.startswith('adm:colorset:'):
+  if u.id not in ADMINS:return
+  parts=d.split(':')
+  # key names may contain colons; the final segment is always the selected style.
+  key=':'.join(parts[2:-1]); color=parts[-1]
+  if color not in {'default','primary','success','danger'} or not any(x[0]==key for x in COLOR_BUTTONS):return
+  set_setting('button_color_'+key,color)
+  item=next(x for x in COLOR_BUTTONS if x[0]==key)
+  names={'default':'⚪ پیش‌فرض','primary':'🔵 آبی','success':'🟢 سبز','danger':'🔴 قرمز'}
+  await edit(q,f'✅ رنگ «{item[1]}» ذخیره شد: {names[color]}',K([[b('🎨 تغییر رنگ همین دکمه','adm:colorpick:'+key)],[b('🖌 فهرست رنگ‌ها','adm:colors')],[b('⬅️ پنل مدیریت','admin')]]),ParseMode.HTML)
  elif d=='adm:price':
   if u.id not in ADMINS:return
   ctx.user_data.pop('admin_setting_mode',None)
