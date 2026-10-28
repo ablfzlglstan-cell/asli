@@ -65,7 +65,7 @@ COLOR_BUTTONS = [
 
 def button_color_key(data):
  if data.startswith('product:'): return 'product_item'
- for prefix,key in (('adm:pricepick:','adm:pricepick'),('adm:textedit:','adm:textedit'),('adm:emojipick:','adm:emojipick'),('adm:order:','adm:order'),('adm:wallet:','adm:wallet'),('adm:colorpage:','adm:colorpage'),('adm:colorpick:','adm:colorpick'),('approve:','approve'),('reject:','reject'),('delivered:','delivered'),('walletok:','walletok'),('walletno:','walletno')):
+ for prefix,key in (('adm:pricepick:','adm:pricepick'),('adm:textedit:','adm:textedit'),('adm:emojipick:','adm:emojipick'),('adm:emojipage:','adm:emojipage'),('adm:order:','adm:order'),('adm:wallet:','adm:wallet'),('adm:colorpage:','adm:colorpage'),('adm:colorpick:','adm:colorpick'),('approve:','approve'),('reject:','reject'),('delivered:','delivered'),('walletok:','walletok'),('walletno:','walletno')):
   if data.startswith(prefix): return key
  if data in ('adm:pricecancel','adm:textcancel','adm:emojicancel'): return data
  return data
@@ -75,6 +75,14 @@ def b(text,data,style=None):
  if color:
   style = None if color == 'default' else color
  a={'text':str(text),'callback_data':data}
+ # Per-button emoji overrides apply to all button families, not only the main menu.
+ # Main-menu items already use the legacy emoji_* settings and must not get a duplicate prefix.
+ main_keys={'buy:stars','buy:premium','wallet','orders','ourlinks','support','admin'}
+ if data not in main_keys:
+  emoji_key=button_color_key(data).replace(':','_')
+  prefix=setting('emoji_button_'+emoji_key,'').strip()
+  if prefix:
+   a['text']=prefix+' '+a['text']
  match=re.search(r'<tg-emoji\s+emoji-id=["\'](\d+)["\']>(.*?)</tg-emoji>',a['text'],re.S)
  if match:
   a['icon_custom_emoji_id']=match.group(1)
@@ -88,11 +96,19 @@ def b(text,data,style=None):
 def url_button(text,url,key):
  color=setting('button_color_'+key,'')
  style=None if not color or color=='default' else color
- args={'text':str(text),'url':url}
+ label=str(text)
+ prefix=setting('emoji_button_'+key.replace(':','_'),'').strip()
+ args={'text':(prefix+' ' if prefix else '')+label,'url':url}
+ match=re.search(r'<tg-emoji\s+emoji-id=["\'](\d+)["\']>(.*?)</tg-emoji>',args['text'],re.S)
+ if match:
+  args['icon_custom_emoji_id']=match.group(1)
+  args['text']=args['text'][:match.start()]+args['text'][match.end():]
  if style: args['style']=style
  try: return B(**args)
  except (TypeError,ValueError):
-  args.pop('style',None); return B(**args)
+  args.pop('style',None); args.pop('icon_custom_emoji_id',None)
+  args['text']=re.sub(r'<tg-emoji\s+emoji-id=["\']\d+["\']>(.*?)</tg-emoji>',r'\1',args['text'],flags=re.S)
+  return B(**args)
 TON_CACHE = {"value": None, "at": 0}
 def _fetch_ton_rate():
     """Read public TON/IRT price from SwapWallet's public market endpoint/page."""
@@ -388,7 +404,7 @@ async def cb(up,ctx):
  elif d.startswith('adm:textedit:'):
   if u.id not in ADMINS:return
   key=d.split(':',2)[2]
-  labels={'menu_prompt':'متن منوی اصلی','welcome':'پیام شروع','help':'راهنما','support_prompt':'متن پشتیبانی','trust':'متن اعتمادسازی','gift':'متن گیفت','boost':'متن بوست'}
+  labels={'menu_prompt':'متن منوی اصلی','welcome':'پیام شروع','help':'راهنما','support_prompt':'متن پشتیبانی','trust':'متن اعتمادسازی','gift':'متن گیفت','boost':'متن بوست','rules':'قوانین خرید','buyguide':'راهنمای خرید'}
   if key not in labels:return
   ctx.user_data['admin_setting_mode']='text_edit_'+key;ctx.user_data['admin_text_key']=key
   await edit(q,f'✏️ <b>{labels[key]}</b>\nمتن جدید رو در یک پیام بفرست. ایموجی‌های پریمیوم/Custom Emoji هم ذخیره می‌شن.',K([[b('❌ لغو','adm:textcancel')],[b('⬅️ فهرست متن‌ها','adm:texts')]]),ParseMode.HTML)
@@ -396,14 +412,30 @@ async def cb(up,ctx):
   if u.id not in ADMINS:return
   ctx.user_data.pop('admin_setting_mode',None);ctx.user_data.pop('admin_text_key',None)
   await edit(q,'ویرایش متن لغو شد.',K([[b('📝 ویرایش متن‌ها','adm:texts')],[b('⬅️ پنل','admin')]]))
- elif d=='adm:emoji':
+ elif d=='adm:emoji' or d.startswith('adm:emojipage:'):
   if u.id not in ADMINS:return
-  emoji_items=[('stars','⭐ استارز'),('premium','💎 پریمیوم'),('wallet','👛 کیف پول'),('orders','🧾 سفارش‌ها'),('links','🌐 لینک‌ها'),('support','📞 پشتیبانی'),('admin','🛠 مدیریت')]
-  await edit(q,'🎨 <b>انتخاب ایموجی دکمه‌ها</b>\nاول مورد رو انتخاب کن؛ بعد ایموجی معمولی یا پریمیوم رو در یک پیام بفرست. شناسهٔ ایموجی پریمیوم ذخیره می‌شه.',K([[b(label,'adm:emojipick:'+key)] for key,label in emoji_items]+[[b('⬅️ پنل','admin')]]),ParseMode.HTML)
+  emoji_items=[('stars','⭐ خرید استارز'),('premium','💎 خرید پریمیوم'),('wallet','👛 کیف پول'),('orders','🧾 سفارش‌های من'),('links','🌐 کانال‌ها و ربات‌ها'),('support','📞 پشتیبانی'),('admin','🛠 پنل مدیریت')]
+  # Every configured button family is included, with pagination so Telegram does not truncate the list.
+  seen={x[0] for x in emoji_items}
+  main_callback_keys={'buy:stars','buy:premium','wallet','orders','ourlinks','support','admin'}
+  for key,label in COLOR_BUTTONS:
+   if key in seen or key in main_callback_keys: continue
+   emoji_items.append(('btn_'+key.replace(':','_'),label)); seen.add(key)
+  per_page=8; pages=(len(emoji_items)+per_page-1)//per_page
+  page=0 if d=='adm:emoji' else int(d.rsplit(':',1)[1])
+  page=max(0,min(page,pages-1)); start=page*per_page
+  rows=[[b(label,'adm:emojipick:'+key)] for key,label in emoji_items[start:start+per_page]]
+  nav=[]
+  if page>0: nav.append(b('⬅️ قبلی',f'adm:emojipage:{page-1}'))
+  if page<pages-1: nav.append(b('➡️ بعدی',f'adm:emojipage:{page+1}'))
+  if nav: rows.append(nav)
+  rows.append([b('⬅️ پنل','admin')])
+  await edit(q,f'🎨 <b>تغییر ایموجی دکمه‌ها</b>\nمورد موردنظرت رو انتخاب کن.\nصفحه {page+1} از {pages} — بعد از انتخاب، ایموجی معمولی یا پریمیوم رو بفرست.',K(rows),ParseMode.HTML)
  elif d.startswith('adm:emojipick:'):
   if u.id not in ADMINS:return
   key=d.split(':',2)[2]
-  if key not in {'stars','premium','wallet','orders','links','support','admin'}:return
+  allowed={'stars','premium','wallet','orders','links','support','admin'} | {'btn_'+x[0].replace(':','_') for x in COLOR_BUTTONS}
+  if key not in allowed:return
   ctx.user_data['admin_setting_mode']='emoji_pick';ctx.user_data['emoji_pick_key']=key
   await edit(q,f'🎨 ایموجی جدید برای «{key}» رو همین‌جا بفرست؛ ایموجی پریمیوم هم قبوله.',K([[b('❌ لغو','adm:emojicancel')],[b('⬅️ فهرست ایموجی‌ها','adm:emoji')]]))
  elif d=='adm:emojicancel':
@@ -508,7 +540,8 @@ async def messages(up,ctx):
   return
  if m.text and ctx.user_data.get('admin_setting_mode')=='emoji_pick' and u.id in ADMINS:
   key=ctx.user_data.pop('emoji_pick_key',None);ctx.user_data.pop('admin_setting_mode',None)
-  if not key or key not in {'stars','premium','wallet','orders','links','support','admin'}:
+  allowed={'stars','premium','wallet','orders','links','support','admin'} | {'btn_'+x[0].replace(':','_') for x in COLOR_BUTTONS}
+  if not key or key not in allowed:
    await m.reply_text('مورد ایموجی پیدا نشد؛ دوباره از منو انتخاب کن.',reply_markup=K([[b('🎨 ایموجی‌ها','adm:emoji')]]));return
   entity=next((e for e in (m.entities or []) if e.type=='custom_emoji'),None)
   if entity:
@@ -517,7 +550,10 @@ async def messages(up,ctx):
   else: value=m.text.strip()
   if not value or len(value)>64:
    await m.reply_text('فقط یک ایموجی بفرست.',reply_markup=K([[b('🎨 دوباره انتخاب کن','adm:emoji')]]));return
-  set_setting('emoji_'+key,value)
+  if key.startswith('btn_'):
+   set_setting('emoji_button_'+key[4:],value)
+  else:
+   set_setting('emoji_'+key,value)
   await m.reply_text('✅ ایموجی ذخیره شد. شناسهٔ ایموجی پریمیوم هم حفظ شد.',reply_markup=K([[b('🎨 انتخاب ایموجی دیگر','adm:emoji')],[b('⬅️ پنل مدیریت','admin')]]),parse_mode=ParseMode.HTML)
   return
  if m.text and ctx.user_data.get('admin_setting_mode') and u.id in ADMINS:
