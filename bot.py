@@ -1,4 +1,4 @@
-import os, sqlite3, logging, json, re, random, urllib.request, asyncio
+import os, sqlite3, logging, json, re, random, urllib.request, asyncio, html
 from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton as B, InlineKeyboardMarkup as K, ReactionTypeEmoji
 from telegram.constants import ParseMode
@@ -19,7 +19,7 @@ def init():
   c.executescript('''CREATE TABLE IF NOT EXISTS users(uid INTEGER PRIMARY KEY,username TEXT,first_name TEXT,balance INTEGER DEFAULT 0,created TEXT); CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER,kind TEXT,pkey TEXT,title TEXT,amount INTEGER,method TEXT,status TEXT,receipt TEXT,created TEXT, recipient TEXT DEFAULT ''); CREATE TABLE IF NOT EXISTS wallet(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER,amount INTEGER,status TEXT,receipt TEXT,created TEXT); CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);''')
   cols={r['name'] for r in c.execute('PRAGMA table_info(orders)').fetchall()}
   if 'recipient' not in cols: c.execute("ALTER TABLE orders ADD COLUMN recipient TEXT DEFAULT ''")
-  for k,v in [('link1_title','کانال وینکسا'),('link1_url','https://t.me/VynexaVPN'),('link2_title','ربات وینکسا'),('link2_url','https://t.me/VynexaVPN_bot'),('link3_title','کانال سوم'),('link3_url','https://t.me/'),('link4_title','ربات چهارم'),('link4_url','https://t.me/'),('emoji_stars','⭐'),('emoji_premium','💎'),('emoji_wallet','👛'),('emoji_orders','🧾'),('emoji_links','🌐'),('emoji_support','📞'),('emoji_admin','🛠')]: c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(k,v))
+  for k,v in [('link1_title','کانال وینکسا'),('link1_url','https://t.me/VynexaVPN'),('link2_title','ربات وینکسا'),('link2_url','https://t.me/VynexaVPN_bot'),('link3_title','کانال سوم'),('link3_url','https://t.me/'),('link4_title','ربات چهارم'),('link4_url','https://t.me/'),('emoji_stars','⭐'),('emoji_premium','💎'),('emoji_wallet','👛'),('emoji_orders','🧾'),('emoji_links','🌐'),('emoji_support','📞'),('emoji_admin','🛠'),('text_welcome',''),('text_help',''),('text_trust',''),('text_gift',''),('text_boost','')]: c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(k,v))
 # Small in-process cache avoids opening/querying SQLite repeatedly while building menus.
 _SETTINGS_CACHE = {}
 def setting(key, default=''):
@@ -40,10 +40,17 @@ def bal(uid):
  with con() as c:
   r=c.execute('SELECT balance FROM users WHERE uid=?',(uid,)).fetchone(); return r['balance'] if r else 0
 def b(text,data,style=None):
- a={'text':text,'callback_data':data}
+ a={'text':str(text),'callback_data':data}
+ match=re.search(r'<tg-emoji\s+emoji-id=["\'](\d+)["\']>(.*?)</tg-emoji>',a['text'],re.S)
+ if match:
+  a['icon_custom_emoji_id']=match.group(1)
+  a['text']=a['text'][:match.start()]+a['text'][match.end():]
  if style:a['style']=style
  try:return B(**a)
- except TypeError:a.pop('style',None);a.pop('icon_custom_emoji_id',None);return B(**a)
+ except (TypeError,ValueError):
+  a.pop('style',None);a.pop('icon_custom_emoji_id',None)
+  a['text']=re.sub(r'<tg-emoji\s+emoji-id=["\']\d+["\']>(.*?)</tg-emoji>',r'\1',a['text'],flags=re.S)
+  return B(**a)
 TON_CACHE = {"value": None, "at": 0}
 def _fetch_ton_rate():
     """Read public TON/IRT price from SwapWallet's public market endpoint/page."""
@@ -137,7 +144,7 @@ async def admins(ctx,text,markup=None):
 def order_buttons(oid): return K([[b('✅ تأیید پرداخت',f'approve:{oid}','success'),b('❌ رد سفارش',f'reject:{oid}','danger')],[b('🎉 ثبت تحویل',f'delivered:{oid}','primary')]])
 async def start(up,ctx):
  ensure(up.effective_user)
- welcome = ('✨ <b>به Vynexa Stars خوش اومدی!</b>\n\n'
+ welcome = setting('text_welcome','') or ('✨ <b>به Vynexa Stars خوش اومدی!</b>\n\n'
   'اینجا می‌تونی بسته‌های استارز و تلگرام پریمیوم رو بررسی کنی و سفارشت رو ثبت کنی.\n'
   'قبل از پرداخت، فاکتور و مبلغ نهایی بهت نمایش داده می‌شه تا با خیال راحت بررسیش کنی.\n\n'
   '💙 <b>Vynexa Stars | دنیای بدون مرز</b>\n'
@@ -169,10 +176,10 @@ async def payment_choice(q,p,recipient):
  invoice = (
   '🧾 <b>فاکتور سفارش</b>\n\n'
   f'🌐 سرویس: {kind_label} ✨\n'
-  f'📦 بسته: {p["title"]}\n'
-  f'👤 نام کاربری گیرنده: {username or "ثبت نشده"}\n'
-  f'🆔 آیدی عددی گیرنده: {numeric_id or "در دسترس نیست"}\n'
-  f'💰 مبلغ: <b>{money(p["amount"])}</b> تومان 💳\n\n'
+  f'📦 بسته: {html.escape(str(p["title"]))}\n'
+  f'👤 گیرنده: {html.escape(username or "ثبت نشده")}\n'
+  f'🆔 آیدی عددی: {html.escape(numeric_id or "در دسترس نیست")}\n'
+  f'💰 مبلغ: <b>{money(p["amount"])}</b> 💳\n\n'
   '🔎 لطفاً فاکتور را بررسی کن.\n\n'
   '✅ اگر مشخصات و مبلغ درست است، فاکتور را تأیید کن.'
  )
@@ -180,7 +187,7 @@ async def payment_choice(q,p,recipient):
 
 async def cb(up,ctx):
  q=up.callback_query; await q.answer(); u=up.effective_user; ensure(u); d=q.data
- if d=='home': ctx.user_data.pop('product',None); await edit(q,setting('text_menu_prompt',f'✨ <b>Vynexa Stars</b>\n{setting("text_menu_prompt", "چه کاری برات انجام بدم؟")}'),menu(u.id),ParseMode.HTML)
+ if d=='home': ctx.user_data.pop('product',None); await edit(q,setting('text_menu_prompt','✨ <b>Vynexa Stars</b>\nچه کاری برات انجام بدم؟'),menu(u.id),ParseMode.HTML)
  elif d.startswith('buy:'): await edit(q,'بسته موردنظرت رو انتخاب کن:',product_menu(d.split(':')[1]))
  elif d=='stars:custom':
   ctx.user_data['await_custom_stars']=True
@@ -204,9 +211,9 @@ async def cb(up,ctx):
   await payment_choice(q,p,rec)
  elif d=='ourlinks': await edit(q,'🌐 <b>کانال ها و ربات های ما</b>\nیکی از گزینه‌ها رو انتخاب کن:',links_menu(),ParseMode.HTML)
  elif d=='trust':
-  await edit(q,'🔐 <b>چطور می‌تونی به ما اعتماد کنی؟</b>\n\n'
+  await edit(q,setting('text_trust','') or ('🔐 <b>چطور می‌تونی به ما اعتماد کنی؟</b>\n\n'
    'برای آشنایی بیشتر با فعالیت‌های وینکسا، وارد بخش «کانال‌ها و ربات‌های ما» شو و کانال‌ها و ربات‌های معرفی‌شده رو بررسی کن.\n\n'
-   '💬 اگر سؤالی داشتی، قبل از پرداخت از پشتیبانی بپرس و همیشه مشخصات و مبلغ فاکتور رو با دقت بررسی کن.',
+   '💬 اگر سؤالی داشتی، قبل از پرداخت از پشتیبانی بپرس و همیشه مشخصات و مبلغ فاکتور رو با دقت بررسی کن.'),
    K([[b('🌐 کانال‌ها و ربات‌های ما','ourlinks')],[b('📞 پشتیبانی','support')],[b('⬅️ منو','home')]]),ParseMode.HTML)
  elif d=='invoice:confirm':
   p=ctx.user_data.get('product'); recipient=ctx.user_data.get('recipient','')
@@ -231,9 +238,9 @@ async def cb(up,ctx):
   with con() as c: rs=c.execute('SELECT id,title,amount,status FROM orders WHERE uid=? ORDER BY id DESC LIMIT 10',(u.id,)).fetchall()
   names={'awaiting_receipt':'در انتظار رسید','paid_pending_delivery':'در انتظار تحویل','delivered':'تحویل‌شده','rejected':'ردشده'}; text='🧾 <b>سفارش‌های من</b>\n\n'+('\n\n'.join(f"#{r['id']} · {r['title']} · {money(r['amount'])}\nوضعیت: {names.get(r['status'],r['status'])}" for r in rs) if rs else 'هنوز سفارشی نداری.')
   await edit(q,text,K([[b('⬅️ منو','home')]]),ParseMode.HTML)
- elif d=='feature:gift': await q.answer('🎁 این بخش هنوز آماده نشده است. تیم وینکسا در حال تکمیل این قابلیت است؛ لطفاً بعداً دوباره سر بزن.',show_alert=True)
- elif d=='feature:boost': await q.answer('🚀 بخش بوست چنل هنوز آماده نشده است. به‌محض تکمیل، از همین‌جا در دسترس قرار می‌گیرد.',show_alert=True)
- elif d=='support': await edit(q,setting('text_support_prompt',f'📞 پشتیبانی: @{SUPPORT}'),K([[b('⬅️ منو','home')]]))
+ elif d=='feature:gift': await edit(q,setting('text_gift','🎁 این بخش هنوز آماده نشده است. تیم وینکسا در حال تکمیل این قابلیت است؛ لطفاً بعداً دوباره سر بزن.'),K([[b('⬅️ منو','home')]]),ParseMode.HTML)
+ elif d=='feature:boost': await edit(q,setting('text_boost','🚀 بخش بوست چنل هنوز آماده نشده است. به‌محض تکمیل، از همین‌جا در دسترس قرار می‌گیرد.'),K([[b('⬅️ منو','home')]]),ParseMode.HTML)
+ elif d=='support': await edit(q,setting('text_support_prompt',f'📞 پشتیبانی: @{SUPPORT}'),K([[b('⬅️ منو','home')]]),ParseMode.HTML)
  elif d=='admin':
   if u.id not in ADMINS:return
   with con() as c: n=c.execute("SELECT COUNT(*) n FROM orders WHERE status IN ('awaiting_receipt','paid_pending_delivery')").fetchone()['n']; w=c.execute("SELECT COUNT(*) n FROM wallet WHERE status='pending'").fetchone()['n']
@@ -274,10 +281,34 @@ async def cb(up,ctx):
   if u.id not in ADMINS:return
   ctx.user_data['admin_setting_mode']='links'; await edit(q,'برای تغییر هر لینک، یک خط با قالب زیر بفرست (چهار لینک قابل تنظیم است):\n1|عنوان|https://t.me/example\n2|عنوان|https://t.me/example\n3|عنوان|https://t.me/example\n4|عنوان|https://t.me/example',K([[b('⬅️ پنل','admin')]]))
  elif d=='adm:texts':
-  await edit(q,'📝 <b>ویرایش متن‌ها</b>\nمتن موردنظر را انتخاب کن:',K([[b('🏠 متن منوی اصلی','adm:textedit:menu_prompt')],[b('📞 متن پشتیبانی','adm:textedit:support_prompt')],[b('⬅️ بازگشت','admin')]]),ParseMode.HTML)
+  if u.id not in ADMINS:return
+  text_items=[('menu_prompt','🏠 متن منوی اصلی'),('welcome','👋 پیام شروع'),('help','📘 راهنما'),('support_prompt','📞 متن پشتیبانی'),('trust','🔐 متن اعتمادسازی'),('gift','🎁 متن گیفت'),('boost','🚀 متن بوست')]
+  await edit(q,'📝 <b>ویرایش متن‌ها</b>\nیکی از متن‌ها رو انتخاب کن. ایموجی پریمیوم هم داخل متن پشتیبانی می‌شه.',K([[b(label,'adm:textedit:'+key)] for key,label in text_items]+[[b('⬅️ بازگشت','admin')]]),ParseMode.HTML)
+ elif d.startswith('adm:textedit:'):
+  if u.id not in ADMINS:return
+  key=d.split(':',2)[2]
+  labels={'menu_prompt':'متن منوی اصلی','welcome':'پیام شروع','help':'راهنما','support_prompt':'متن پشتیبانی','trust':'متن اعتمادسازی','gift':'متن گیفت','boost':'متن بوست'}
+  if key not in labels:return
+  ctx.user_data['admin_setting_mode']='text_edit_'+key;ctx.user_data['admin_text_key']=key
+  await edit(q,f'✏️ <b>{labels[key]}</b>\nمتن جدید رو در یک پیام بفرست. ایموجی‌های پریمیوم/Custom Emoji هم ذخیره می‌شن.',K([[b('❌ لغو','adm:textcancel')],[b('⬅️ فهرست متن‌ها','adm:texts')]]),ParseMode.HTML)
+ elif d=='adm:textcancel':
+  if u.id not in ADMINS:return
+  ctx.user_data.pop('admin_setting_mode',None);ctx.user_data.pop('admin_text_key',None)
+  await edit(q,'ویرایش متن لغو شد.',K([[b('📝 ویرایش متن‌ها','adm:texts')],[b('⬅️ پنل','admin')]]))
  elif d=='adm:emoji':
   if u.id not in ADMINS:return
-  ctx.user_data['admin_setting_mode']='emoji'; await edit(q,'برای تغییر ایموجی‌ها یک خط برای هر مورد بفرست، مثل:\nstars=✨\npremium=👑\nwallet=💰\norders=📦\nlinks=🌐\nsupport=💬\nadmin=⚙️',K([[b('⬅️ پنل','admin')]]))
+  emoji_items=[('stars','⭐ استارز'),('premium','💎 پریمیوم'),('wallet','👛 کیف پول'),('orders','🧾 سفارش‌ها'),('links','🌐 لینک‌ها'),('support','📞 پشتیبانی'),('admin','🛠 مدیریت')]
+  await edit(q,'🎨 <b>انتخاب ایموجی دکمه‌ها</b>\nاول مورد رو انتخاب کن؛ بعد ایموجی معمولی یا پریمیوم رو در یک پیام بفرست. شناسهٔ ایموجی پریمیوم ذخیره می‌شه.',K([[b(label,'adm:emojipick:'+key)] for key,label in emoji_items]+[[b('⬅️ پنل','admin')]]),ParseMode.HTML)
+ elif d.startswith('adm:emojipick:'):
+  if u.id not in ADMINS:return
+  key=d.split(':',2)[2]
+  if key not in {'stars','premium','wallet','orders','links','support','admin'}:return
+  ctx.user_data['admin_setting_mode']='emoji_pick';ctx.user_data['emoji_pick_key']=key
+  await edit(q,f'🎨 ایموجی جدید برای «{key}» رو همین‌جا بفرست؛ ایموجی پریمیوم هم قبوله.',K([[b('❌ لغو','adm:emojicancel')],[b('⬅️ فهرست ایموجی‌ها','adm:emoji')]]))
+ elif d=='adm:emojicancel':
+  if u.id not in ADMINS:return
+  ctx.user_data.pop('admin_setting_mode',None);ctx.user_data.pop('emoji_pick_key',None)
+  await edit(q,'تغییر ایموجی لغو شد.',K([[b('🎨 ایموجی‌ها','adm:emoji')],[b('⬅️ پنل','admin')]]))
  elif d=='adm:orders':
   if u.id not in ADMINS:return
   with con() as c: rs=c.execute("SELECT id,uid,title,amount,status FROM orders WHERE status IN ('awaiting_receipt','paid_pending_delivery') ORDER BY id DESC LIMIT 20").fetchall()
@@ -344,11 +375,29 @@ async def messages(up,ctx):
   title=ctx.user_data.get('pending_price_title','محصول')
   await m.reply_text(f'🔎 <b>تأیید قیمت جدید</b>\n\nمحصول: {title}\nقیمت جدید: <b>{money(amount)}</b>\n\nذخیره بشه؟',reply_markup=K([[b('✅ تأیید و ذخیره','adm:priceconfirm','success')],[b('✏️ وارد کردن دوباره','adm:pricepick:'+ctx.user_data['pending_price_key'])],[b('❌ لغو','adm:pricecancel','danger')]]),parse_mode=ParseMode.HTML)
   return
- if m.text and ctx.user_data.get('admin_setting_mode') in ('text_edit_menu_prompt','text_edit_support_prompt') and u.id in ADMINS:
+ if m.text and ctx.user_data.get('admin_setting_mode','').startswith('text_edit_') and u.id in ADMINS:
   mode=ctx.user_data.pop('admin_setting_mode')
-  key='text_menu_prompt' if mode=='text_edit_menu_prompt' else 'text_support_prompt'
-  set_setting(key,m.text.strip())
-  await m.reply_text('✅ متن ذخیره شد.',reply_markup=menu(u.id))
+  key=ctx.user_data.pop('admin_text_key',mode[len('text_edit_'):])
+  setting_keys={'menu_prompt':'text_menu_prompt','welcome':'text_welcome','help':'text_help','support_prompt':'text_support_prompt','trust':'text_trust','gift':'text_gift','boost':'text_boost'}
+  rich_text=(m.text_html or m.text).strip()
+  if key in setting_keys:
+   set_setting(setting_keys[key],rich_text[:8000])
+   await m.reply_text('✅ متن ذخیره شد؛ ایموجی‌های پریمیوم هم همراه متن ذخیره شدن.',reply_markup=K([[b('📝 ویرایش متن‌ها','adm:texts')],[b('⬅️ پنل مدیریت','admin')]]))
+  else: await m.reply_text('کلید متن معتبر نیست.')
+  return
+ if m.text and ctx.user_data.get('admin_setting_mode')=='emoji_pick' and u.id in ADMINS:
+  key=ctx.user_data.pop('emoji_pick_key',None);ctx.user_data.pop('admin_setting_mode',None)
+  if not key or key not in {'stars','premium','wallet','orders','links','support','admin'}:
+   await m.reply_text('مورد ایموجی پیدا نشد؛ دوباره از منو انتخاب کن.',reply_markup=K([[b('🎨 ایموجی‌ها','adm:emoji')]]));return
+  entity=next((e for e in (m.entities or []) if e.type=='custom_emoji'),None)
+  if entity:
+   fallback=m.text[entity.offset:entity.offset+entity.length]
+   value=f'<tg-emoji emoji-id="{entity.custom_emoji_id}">{fallback}</tg-emoji>'
+  else: value=m.text.strip()
+  if not value or len(value)>64:
+   await m.reply_text('فقط یک ایموجی بفرست.',reply_markup=K([[b('🎨 دوباره انتخاب کن','adm:emoji')]]));return
+  set_setting('emoji_'+key,value)
+  await m.reply_text('✅ ایموجی ذخیره شد. شناسهٔ ایموجی پریمیوم هم حفظ شد.',reply_markup=K([[b('🎨 انتخاب ایموجی دیگر','adm:emoji')],[b('⬅️ پنل مدیریت','admin')]]),parse_mode=ParseMode.HTML)
   return
  if m.text and ctx.user_data.get('admin_setting_mode') and u.id in ADMINS:
   mode=ctx.user_data.pop('admin_setting_mode'); lines=m.text.splitlines(); ok=0
@@ -366,13 +415,6 @@ async def messages(up,ctx):
      parts=line.split('|',2)
      if len(parts)==3 and parts[0].strip() in ('1','2','3','4') and parts[2].strip().startswith(('https://','http://','tg://')):
       i=parts[0].strip(); set_setting('link'+i+'_title',parts[1].strip()[:60]); set_setting('link'+i+'_url',parts[2].strip()); ok+=1
-   elif mode=='texts':
-    mp={'menu_prompt':'text_menu_prompt','support_prompt':'text_support_prompt'}
-    for line in lines:
-     if '=' not in line: continue
-     key,val=line.split('=',1); key=key.strip(); val=val.strip().replace('|','\n')
-     if key in mp and val:
-      set_setting(mp[key],val[:3000]); ok+=1
    elif mode=='emoji':
     mp={'stars':'emoji_stars','premium':'emoji_premium','wallet':'emoji_wallet','orders':'emoji_orders','links':'emoji_links','support':'emoji_support','admin':'emoji_admin'}
     for line in lines:
