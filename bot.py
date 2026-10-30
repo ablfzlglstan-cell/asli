@@ -1,4 +1,5 @@
-import os, sqlite3, logging, json, re, random, urllib.request, asyncio, html, hmac, time
+import os, sqlite3, logging, json, re, random, urllib.request, asyncio, html, hmac, time, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton as B, InlineKeyboardMarkup as K, ReactionTypeEmoji
 from telegram.constants import ParseMode
@@ -810,13 +811,65 @@ async def auto_react(up,ctx):
  except Exception as e:
   logging.warning("Auto-reaction failed: chat=%s message=%s emoji=%s error=%s",chat.id,m.message_id,chosen,str(e)[:300])
 
+# Small authenticated HTTP endpoint used by VynexaVPN to report /start events.
+_challenge_http_server = None
+
+def _challenge_start_server(app):
+    global _challenge_http_server
+    secret = CHALLENGE_SECRET
+    if not secret:
+        raise RuntimeError('CHALLENGE_SHARED_SECRET تنظیم نشده است؛ سرور مسابقه اجرا نشد.')
+    port = int(os.getenv('PORT', '8080'))
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            logging.info('Challenge API: ' + fmt, *args)
+
+        def _reply(self, status, payload):
+            body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path.rstrip('/') == '/health':
+                return self._reply(200, {'ok': True, 'service': 'vynexa-stars'})
+            return self._reply(404, {'ok': False, 'error': 'not_found'})
+
+        def do_POST(self):
+            if self.path.rstrip('/') != '/started':
+                return self._reply(404, {'ok': False, 'error': 'not_found'})
+            supplied = self.headers.get('X-Vynexa-Secret', '')
+            if not hmac.compare_digest(supplied, secret):
+                return self._reply(403, {'ok': False, 'error': 'forbidden'})
+            try:
+                size = int(self.headers.get('Content-Length', '0'))
+                if size < 1 or size > 4096:
+                    return self._reply(400, {'ok': False, 'error': 'invalid_size'})
+                payload = json.loads(self.rfile.read(size).decode('utf-8'))
+                uid = int(payload.get('uid', 0))
+                bot_name = str(payload.get('bot', '')).strip().lower()
+                if uid <= 0 or bot_name not in ('vpn', 'stars'):
+                    return self._reply(400, {'ok': False, 'error': 'invalid_payload'})
+                challenge_mark_started(uid, bot_name)
+                return self._reply(200, {'ok': True})
+            except Exception:
+                return self._reply(400, {'ok': False, 'error': 'invalid_request'})
+
+    _challenge_http_server = ThreadingHTTPServer(('0.0.0.0', port), Handler)
+    threading.Thread(target=_challenge_http_server.serve_forever, name='challenge-http', daemon=True).start()
+    logging.info('Vynexa challenge API listening on port %s', port)
+
+
 async def post_init(app):
  init()
  for k in ('3','6','12'): PREM[k]=int(setting('PRICE_PREMIUM_'+k+'M',str(PREM[k])))
  for k in ('50','100','250','500','1000'): STARS[k]=int(setting('PRICE_STARS_'+k,str(STARS[k])))
  try: await app.bot.set_my_commands([('start','شروع ربات'),('help','راهنما')])
  except TelegramError: pass
- await _challenge_start_server(app)
+ _challenge_start_server(app)
  logging.info('Vynexa Stars started')
 def main():
  if not TOKEN:raise SystemExit('BOT_TOKEN را در Environment Variables هاست تنظیم کن.')
