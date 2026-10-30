@@ -1,5 +1,6 @@
-import os, sqlite3, logging, json, re, random, urllib.request, asyncio, html, hmac, time, threading
+import os, sqlite3, logging, json, re, random, urllib.request, asyncio, html, hmac, time, threading, hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton as B, InlineKeyboardMarkup as K, ReactionTypeEmoji
 from telegram.constants import ParseMode
@@ -10,7 +11,8 @@ TOKEN=os.getenv('BOT_TOKEN','').strip()
 ADMINS={int(x) for x in os.getenv('ADMIN_IDS','').split(',') if x.strip().isdigit()}
 DB=os.getenv('DB_PATH','vynexa_stars.sqlite3'); CARD=os.getenv('CARD_NUMBER','شماره کارت را در تنظیمات وارد کنید'); HOLDER=os.getenv('CARD_HOLDER','نام صاحب کارت را در تنظیمات وارد کنید'); SUPPORT=os.getenv('SUPPORT_USERNAME','fbugtjng').lstrip('@'); CUR=os.getenv('CURRENCY','تومان'); MIN_TOPUP=int(os.getenv('MIN_WALLET_TOPUP','10000'))
 CHALLENGE_CHANNEL=os.getenv('CHALLENGE_CHANNEL_ID','@VynexaVPN').strip() or '@VynexaVPN'
-CHALLENGE_SECRET=os.getenv('CHALLENGE_SHARED_SECRET','').strip()
+CHALLENGE_SECRET=''.join(os.getenv('CHALLENGE_SHARED_SECRET','').split())
+def _challenge_fp(value): return hashlib.sha256(value.encode('utf-8')).hexdigest()[:10] if value else 'EMPTY'
 PREM={k:int(os.getenv('PRICE_PREMIUM_'+k+'M','0')) for k in ('3','6','12')}; STARS={k:int(os.getenv('PRICE_STARS_'+k,'0')) for k in ('50','100','250','500','1000')}
 logging.basicConfig(level=logging.INFO)
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -205,7 +207,7 @@ def order_buttons(oid): return K([[b('✅ تأیید پرداخت',f'approve:{oi
 async def _challenge_signal_start(uid):
  # Best-effort signal to the independent Vynexa Challenge service.
  endpoint=os.getenv('CHALLENGE_API_URL','').strip().rstrip('/')
- secret=os.getenv('CHALLENGE_SHARED_SECRET','').strip()
+ secret=''.join(os.getenv('CHALLENGE_SHARED_SECRET','').split())
  if not endpoint or not secret: return
  def _send():
   import urllib.request
@@ -213,7 +215,7 @@ async def _challenge_signal_start(uid):
   req=urllib.request.Request(endpoint+'/started',data=data,headers={'Content-Type':'application/json','X-Vynexa-Secret':secret},method='POST')
   with urllib.request.urlopen(req,timeout=4) as response: return response.status
  try: await asyncio.to_thread(_send)
- except Exception as e: logging.warning('Challenge start signal failed: %s',str(e)[:180])
+ except Exception as e: logging.warning('Challenge start signal failed: %s (endpoint=%s secret_fp=%s)',str(e)[:120],endpoint,_challenge_fp(secret))
 
 # ===== VYNEXA_CHALLENGE_ENGINE_V1 =====
 def challenge_mark_started(uid, bot_name):
@@ -834,15 +836,16 @@ def _challenge_start_server(app):
             self.wfile.write(body)
 
         def do_GET(self):
-            if self.path.rstrip('/') == '/health':
+            if urlsplit(self.path).path.rstrip('/') == '/health':
                 return self._reply(200, {'ok': True, 'service': 'vynexa-stars'})
             return self._reply(404, {'ok': False, 'error': 'not_found'})
 
         def do_POST(self):
-            if self.path.rstrip('/') != '/started':
+            if urlsplit(self.path).path.rstrip('/') != '/started':
                 return self._reply(404, {'ok': False, 'error': 'not_found'})
-            supplied = self.headers.get('X-Vynexa-Secret', '')
+            supplied = ''.join(self.headers.get('X-Vynexa-Secret', '').split())
             if not hmac.compare_digest(supplied, secret):
+                logging.warning('Challenge auth rejected: expected_fp=%s received_fp=%s header_present=%s', _challenge_fp(secret), _challenge_fp(supplied), bool(supplied))
                 return self._reply(403, {'ok': False, 'error': 'forbidden'})
             try:
                 size = int(self.headers.get('Content-Length', '0'))
@@ -860,7 +863,7 @@ def _challenge_start_server(app):
 
     _challenge_http_server = ThreadingHTTPServer(('0.0.0.0', port), Handler)
     threading.Thread(target=_challenge_http_server.serve_forever, name='challenge-http', daemon=True).start()
-    logging.info('Vynexa challenge API listening on port %s', port)
+    logging.info('Vynexa challenge API listening on port %s (secret_fp=%s)', port, _challenge_fp(secret))
 
 
 async def post_init(app):
