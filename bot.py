@@ -1,4 +1,4 @@
-import os, sqlite3, logging, json, re, random, urllib.request, asyncio, html
+import os, sqlite3, logging, json, re, random, urllib.request, asyncio, html, hmac, time
 from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton as B, InlineKeyboardMarkup as K, ReactionTypeEmoji
 from telegram.constants import ParseMode
@@ -8,6 +8,8 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 TOKEN=os.getenv('BOT_TOKEN','').strip()
 ADMINS={int(x) for x in os.getenv('ADMIN_IDS','').split(',') if x.strip().isdigit()}
 DB=os.getenv('DB_PATH','vynexa_stars.sqlite3'); CARD=os.getenv('CARD_NUMBER','شماره کارت را در تنظیمات وارد کنید'); HOLDER=os.getenv('CARD_HOLDER','نام صاحب کارت را در تنظیمات وارد کنید'); SUPPORT=os.getenv('SUPPORT_USERNAME','fbugtjng').lstrip('@'); CUR=os.getenv('CURRENCY','تومان'); MIN_TOPUP=int(os.getenv('MIN_WALLET_TOPUP','10000'))
+CHALLENGE_CHANNEL=os.getenv('CHALLENGE_CHANNEL_ID','@VynexaVPN').strip() or '@VynexaVPN'
+CHALLENGE_SECRET=os.getenv('CHALLENGE_SHARED_SECRET','').strip()
 PREM={k:int(os.getenv('PRICE_PREMIUM_'+k+'M','0')) for k in ('3','6','12')}; STARS={k:int(os.getenv('PRICE_STARS_'+k,'0')) for k in ('50','100','250','500','1000')}
 logging.basicConfig(level=logging.INFO)
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -16,7 +18,22 @@ def con():
  c=sqlite3.connect(DB,timeout=8); c.row_factory=sqlite3.Row; c.execute('PRAGMA busy_timeout=8000'); return c
 def init():
  with con() as c:
-  c.executescript('''CREATE TABLE IF NOT EXISTS users(uid INTEGER PRIMARY KEY,username TEXT,first_name TEXT,balance INTEGER DEFAULT 0,created TEXT); CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER,kind TEXT,pkey TEXT,title TEXT,amount INTEGER,method TEXT,status TEXT,receipt TEXT,created TEXT, recipient TEXT DEFAULT ''); CREATE TABLE IF NOT EXISTS wallet(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER,amount INTEGER,status TEXT,receipt TEXT,created TEXT); CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);''')
+  c.executescript('''CREATE TABLE IF NOT EXISTS users(uid INTEGER PRIMARY KEY,username TEXT,first_name TEXT,balance INTEGER DEFAULT 0,created TEXT); CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER,kind TEXT,pkey TEXT,title TEXT,amount INTEGER,method TEXT,status TEXT,receipt TEXT,created TEXT, recipient TEXT DEFAULT ''); CREATE TABLE IF NOT EXISTS wallet(id INTEGER PRIMARY KEY AUTOINCREMENT,uid INTEGER,amount INTEGER,status TEXT,receipt TEXT,created TEXT); CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS challenge_starts(uid INTEGER NOT NULL,bot TEXT NOT NULL,first_seen TEXT NOT NULL,last_seen TEXT NOT NULL,PRIMARY KEY(uid,bot));
+  CREATE TABLE IF NOT EXISTS contests(id INTEGER PRIMARY KEY AUTOINCREMENT,title TEXT NOT NULL,option_a TEXT NOT NULL,option_b TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',channel_id TEXT NOT NULL,message_id INTEGER,ends_at TEXT NOT NULL,created_by INTEGER NOT NULL,created_at TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS contest_votes(contest_id INTEGER NOT NULL,uid INTEGER NOT NULL,choice TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(contest_id,uid));
+  CREATE TABLE IF NOT EXISTS contest_participants(id INTEGER PRIMARY KEY AUTOINCREMENT,contest_id INTEGER NOT NULL,name TEXT NOT NULL,sort_order INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,UNIQUE(contest_id,name COLLATE NOCASE));''')
+  # Backward-compatible migration: old two-option contests become normal participant lists.
+  for old in c.execute('SELECT id,option_a,option_b FROM contests').fetchall():
+   existing=c.execute('SELECT COUNT(*) n FROM contest_participants WHERE contest_id=?',(old['id'],)).fetchone()['n']
+   if not existing:
+    for idx, name in enumerate((old['option_a'],old['option_b'])):
+     if name and str(name).strip():
+      c.execute('INSERT OR IGNORE INTO contest_participants(contest_id,name,sort_order,created_at) VALUES(?,?,?,?)',(old['id'],str(name).strip(),idx,now()))
+    parts=c.execute('SELECT id,sort_order FROM contest_participants WHERE contest_id=? ORDER BY sort_order,id',(old['id'],)).fetchall()
+    mapping={('a' if i==0 else 'b'):str(p['id']) for i,p in enumerate(parts[:2])}
+    for old_choice,new_choice in mapping.items():
+     c.execute('UPDATE contest_votes SET choice=? WHERE contest_id=? AND choice=?',(new_choice,old['id'],old_choice))
   cols={r['name'] for r in c.execute('PRAGMA table_info(orders)').fetchall()}
   if 'recipient' not in cols: c.execute("ALTER TABLE orders ADD COLUMN recipient TEXT DEFAULT ''")
   for k,v in [('link1_title','کانال وینکسا'),('link1_url','https://t.me/VynexaVPN'),('link2_title','ربات وینکسا'),('link2_url','https://t.me/VynexaVPN_bot'),('link3_title','کانال سوم'),('link3_url','https://t.me/'),('link4_title','ربات چهارم'),('link4_url','https://t.me/'),('emoji_stars','⭐'),('emoji_premium','💎'),('emoji_wallet','👛'),('emoji_orders','🧾'),('emoji_links','🌐'),('emoji_support','📞'),('emoji_admin','🛠'),('text_welcome',''),('text_help',''),('text_trust',''),('text_gift',''),('text_boost',''),('text_rules',''),('text_buyguide',''),('bot_enabled','1')]: c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(k,v))
@@ -60,12 +77,12 @@ COLOR_BUTTONS = [
  ('adm:order','باز کردن سفارش'), ('approve','تأیید پرداخت سفارش'), ('reject','رد سفارش'),
  ('delivered','ثبت تحویل سفارش'), ('walletok','تأیید و شارژ کیف پول'), ('walletno','رد درخواست کیف پول'),
  ('adm:colorpage','صفحه‌بندی فهرست رنگ‌ها'), ('adm:colorpick','انتخاب دکمه برای تغییر رنگ'),
- ('adm:colorset','انتخاب رنگ'), ('adm:togglebot','روشن/خاموش کردن ربات'), ('cancel','لغو / انصراف'),
+ ('adm:colorset','انتخاب رنگ'), ('adm:togglebot','روشن/خاموش کردن ربات'), ('ch:admin','مدیریت مسابقات'), ('ch:create','ساخت مسابقه'), ('ch:list','مسابقه‌های فعال'), ('ch:add','افزودن شرکت‌کننده'), ('ch:stop','بستن مسابقه'), ('cancel','لغو / انصراف'),
 ]
 
 def button_color_key(data):
  if data.startswith('product:'): return 'product_item'
- for prefix,key in (('adm:pricepick:','adm:pricepick'),('adm:textedit:','adm:textedit'),('adm:emojipick:','adm:emojipick'),('adm:emojipage:','adm:emojipage'),('adm:order:','adm:order'),('adm:wallet:','adm:wallet'),('adm:colorpage:','adm:colorpage'),('adm:colorpick:','adm:colorpick'),('approve:','approve'),('reject:','reject'),('delivered:','delivered'),('walletok:','walletok'),('walletno:','walletno')):
+ for prefix,key in (('adm:pricepick:','adm:pricepick'),('adm:textedit:','adm:textedit'),('adm:emojipick:','adm:emojipick'),('adm:order:','adm:order'),('adm:wallet:','adm:wallet'),('adm:colorpage:','adm:colorpage'),('adm:colorpick:','adm:colorpick'),('approve:','approve'),('reject:','reject'),('delivered:','delivered'),('walletok:','walletok'),('walletno:','walletno')):
   if data.startswith(prefix): return key
  if data in ('adm:pricecancel','adm:textcancel','adm:emojicancel'): return data
  return data
@@ -75,14 +92,6 @@ def b(text,data,style=None):
  if color:
   style = None if color == 'default' else color
  a={'text':str(text),'callback_data':data}
- # Per-button emoji overrides apply to all button families, not only the main menu.
- # Main-menu items already use the legacy emoji_* settings and must not get a duplicate prefix.
- main_keys={'buy:stars','buy:premium','wallet','orders','ourlinks','support','admin'}
- if data not in main_keys:
-  emoji_key=button_color_key(data).replace(':','_')
-  prefix=setting('emoji_button_'+emoji_key,'').strip()
-  if prefix:
-   a['text']=prefix+' '+a['text']
  match=re.search(r'<tg-emoji\s+emoji-id=["\'](\d+)["\']>(.*?)</tg-emoji>',a['text'],re.S)
  if match:
   a['icon_custom_emoji_id']=match.group(1)
@@ -96,19 +105,11 @@ def b(text,data,style=None):
 def url_button(text,url,key):
  color=setting('button_color_'+key,'')
  style=None if not color or color=='default' else color
- label=str(text)
- prefix=setting('emoji_button_'+key.replace(':','_'),'').strip()
- args={'text':(prefix+' ' if prefix else '')+label,'url':url}
- match=re.search(r'<tg-emoji\s+emoji-id=["\'](\d+)["\']>(.*?)</tg-emoji>',args['text'],re.S)
- if match:
-  args['icon_custom_emoji_id']=match.group(1)
-  args['text']=args['text'][:match.start()]+args['text'][match.end():]
+ args={'text':str(text),'url':url}
  if style: args['style']=style
  try: return B(**args)
  except (TypeError,ValueError):
-  args.pop('style',None); args.pop('icon_custom_emoji_id',None)
-  args['text']=re.sub(r'<tg-emoji\s+emoji-id=["\']\d+["\']>(.*?)</tg-emoji>',r'\1',args['text'],flags=re.S)
-  return B(**args)
+  args.pop('style',None); return B(**args)
 TON_CACHE = {"value": None, "at": 0}
 def _fetch_ton_rate():
     """Read public TON/IRT price from SwapWallet's public market endpoint/page."""
@@ -200,8 +201,152 @@ async def notify(ctx,uid,text,markup=None):
 async def admins(ctx,text,markup=None):
  for aid in ADMINS: await notify(ctx,aid,text,markup)
 def order_buttons(oid): return K([[b('✅ تأیید پرداخت',f'approve:{oid}','success'),b('❌ رد سفارش',f'reject:{oid}','danger')],[b('🎉 ثبت تحویل',f'delivered:{oid}','primary')]])
+async def _challenge_signal_start(uid):
+ # Best-effort signal to the independent Vynexa Challenge service.
+ endpoint=os.getenv('CHALLENGE_API_URL','').strip().rstrip('/')
+ secret=os.getenv('CHALLENGE_SHARED_SECRET','').strip()
+ if not endpoint or not secret: return
+ def _send():
+  import urllib.request
+  data=json.dumps({'uid':int(uid),'bot':'stars'}).encode('utf-8')
+  req=urllib.request.Request(endpoint+'/started',data=data,headers={'Content-Type':'application/json','X-Vynexa-Secret':secret},method='POST')
+  with urllib.request.urlopen(req,timeout=4) as response: return response.status
+ try: await asyncio.to_thread(_send)
+ except Exception as e: logging.warning('Challenge start signal failed: %s',str(e)[:180])
+
+# ===== VYNEXA_CHALLENGE_ENGINE_V1 =====
+def challenge_mark_started(uid, bot_name):
+    stamp=now()
+    with con() as c:
+        c.execute("INSERT INTO challenge_starts(uid,bot,first_seen,last_seen) VALUES(?,?,?,?) ON CONFLICT(uid,bot) DO UPDATE SET last_seen=excluded.last_seen",(int(uid),str(bot_name),stamp,stamp))
+
+def _challenge_channel_value():
+    raw=CHALLENGE_CHANNEL
+    return int(raw) if raw.lstrip('-').isdigit() else raw
+
+def _challenge_participants(cid):
+    with con() as c:
+        return c.execute('SELECT id,name,sort_order FROM contest_participants WHERE contest_id=? ORDER BY sort_order,id',(int(cid),)).fetchall()
+
+def _challenge_votes(cid):
+    with con() as c:
+        rows=c.execute("SELECT choice,COUNT(*) n FROM contest_votes WHERE contest_id=? GROUP BY choice",(int(cid),)).fetchall()
+    return {str(row['choice']):int(row['n']) for row in rows}
+
+def _challenge_text(row, ended=False):
+    participants=_challenge_participants(row['id']); votes=_challenge_votes(row['id'])
+    total=sum(votes.values())
+    lines=[]
+    for p in participants[:15]:
+        count=votes.get(str(p['id']),0); pct=round(count*100/total) if total else 0
+        lines.append(f"{html.escape(p['name'])} — 👍 <b>{count}</b> رأی · {pct}%")
+    if len(participants)>15: lines.append(f"… و {len(participants)-15} شرکت‌کننده دیگر (از دکمه‌های رأی ورق بزن)")
+    heading='🏁 <b>این مسابقه به‌صورت دستی بسته شد.</b>\n\n' if ended else '👇 برای ثبت رأی، اسم فرد موردنظرت رو انتخاب کن.\n\n'
+    return (f"🏆 <b>{html.escape(row['title'])}</b>\n\n{heading}" + ('\n'.join(lines) if lines else 'هنوز شرکت‌کننده‌ای اضافه نشده.') + f"\n\n👥 مجموع رأی‌ها: <b>{total}</b>\n📌 تعداد شرکت‌کننده‌ها: <b>{len(participants)}</b>\n♾ مسابقه بدون محدودیت زمانی")
+
+def _challenge_markup(row, bot_username, page=0):
+    cid=int(row['id']); participants=_challenge_participants(cid); votes=_challenge_votes(cid)
+    page_size=8; pages=max(1,(len(participants)+page_size-1)//page_size); page=max(0,min(int(page),pages-1))
+    rows=[
+        [B('📲 عضویت در ربات VPN',url='https://t.me/VynexaVPN_bot?start=challenge'),B('⭐ عضویت در ربات Stars',url=f'https://t.me/{bot_username}?start=challenge')]
+    ]
+    subset=participants[page*page_size:(page+1)*page_size]
+    for i in range(0,len(subset),2):
+        pair=subset[i:i+2]
+        rows.append([B(f"👍 {p['name'][:24]} · {votes.get(str(p['id']),0)}",callback_data=f"ch:vote:{cid}:{p['id']}") for p in pair])
+    if pages>1:
+        nav=[]
+        if page>0: nav.append(B('⬅️ قبلی',callback_data=f'ch:page:{cid}:{page-1}'))
+        nav.append(B(f'{page+1}/{pages}',callback_data=f'ch:page:{cid}:{page}'))
+        if page<pages-1: nav.append(B('بعدی ➡️',callback_data=f'ch:page:{cid}:{page+1}'))
+        rows.append(nav)
+    return K(rows)
+
+async def _challenge_refresh_post(bot, cid, ended=False, page=0):
+    with con() as c: row=c.execute('SELECT * FROM contests WHERE id=?',(int(cid),)).fetchone()
+    if not row or not row['message_id']: return
+    try:
+        me=await bot.get_me()
+        markup=None if ended else _challenge_markup(row,me.username or 'VynexaStars_bot',page)
+        await bot.edit_message_text(chat_id=_challenge_channel_value(),message_id=row['message_id'],text=_challenge_text(row,ended),reply_markup=markup,parse_mode=ParseMode.HTML,disable_web_page_preview=True)
+    except TelegramError as exc:
+        logging.warning('Challenge post refresh failed for #%s: %s',cid,str(exc)[:180])
+
+async def _challenge_close(bot, cid):
+    with con() as c:
+        row=c.execute("SELECT * FROM contests WHERE id=? AND status='active'",(int(cid),)).fetchone()
+        if not row: return
+        c.execute("UPDATE contests SET status='ended' WHERE id=? AND status='active'",(int(cid),))
+        row=c.execute('SELECT * FROM contests WHERE id=?',(int(cid),)).fetchone()
+    participants=_challenge_participants(cid); votes=_challenge_votes(cid)
+    if not participants:
+        result='هنوز شرکت‌کننده‌ای ثبت نشده.'
+    else:
+        highest=max((votes.get(str(p['id']),0) for p in participants),default=0)
+        winners=[p['name'] for p in participants if votes.get(str(p['id']),0)==highest]
+        if highest==0: result='هیچ رأی‌ای ثبت نشده؛ برنده‌ای نداریم.'
+        elif len(winners)==1: result=f"🏆 برنده: <b>{html.escape(winners[0])}</b> با {highest} رأی"
+        else: result='🤝 مساوی بین: '+ '، '.join(html.escape(x) for x in winners)+f' با {highest} رأی'
+    await _challenge_refresh_post(bot,cid,True)
+    try:
+        await bot.send_message(chat_id=_challenge_channel_value(),text=f"📣 <b>نتیجه مسابقه</b>\n{result}\n\nمجموع رأی‌ها: {sum(votes.values())}",parse_mode=ParseMode.HTML)
+    except TelegramError as exc: logging.warning('Challenge result announcement failed: %s',str(exc)[:160])
+
+async def _challenge_create_publish(ctx, admin_id, data):
+    with con() as c:
+        cid=c.execute("INSERT INTO contests(title,option_a,option_b,status,channel_id,ends_at,created_by,created_at) VALUES(?,?,?,'active',?,?,?,?)",(data['title'],'','',CHALLENGE_CHANNEL,'',int(admin_id),now())).lastrowid
+        c.execute('INSERT INTO contest_participants(contest_id,name,sort_order,created_at) VALUES(?,?,0,?)',(cid,data['first'],now()))
+        row=c.execute('SELECT * FROM contests WHERE id=?',(cid,)).fetchone()
+    me=await ctx.bot.get_me()
+    try:
+        msg=await ctx.bot.send_message(chat_id=_challenge_channel_value(),text=_challenge_text(row),reply_markup=_challenge_markup(row,me.username or 'VynexaStars_bot'),parse_mode=ParseMode.HTML,disable_web_page_preview=True)
+    except Exception:
+        with con() as c:c.execute("UPDATE contests SET status='failed' WHERE id=?",(cid,))
+        raise
+    with con() as c:c.execute('UPDATE contests SET message_id=? WHERE id=?',(msg.message_id,cid))
+    await ctx.bot.send_message(admin_id,f'✅ مسابقه #{cid} منتشر شد.\nشرکت‌کننده اول: {data["first"]}\nزمان پایان ندارد؛ از پنل هر زمان خواستی شرکت‌کننده اضافه کن یا مسابقه رو ببند.')
+
+async def challenge_add_participant(ctx, admin_id, cid, name):
+    with con() as c:
+        row=c.execute("SELECT id,status FROM contests WHERE id=?",(int(cid),)).fetchone()
+        if not row or row['status']!='active': raise ValueError('این مسابقه فعال نیست.')
+        order=c.execute('SELECT COALESCE(MAX(sort_order),0)+1 n FROM contest_participants WHERE contest_id=?',(int(cid),)).fetchone()['n']
+        c.execute('INSERT INTO contest_participants(contest_id,name,sort_order,created_at) VALUES(?,?,?,?)',(int(cid),name[:60],order,now()))
+    await _challenge_refresh_post(ctx.bot,cid)
+
+async def challenge_vote(q,ctx,cid,participant_id):
+    uid=q.from_user.id
+    with con() as c: row=c.execute("SELECT * FROM contests WHERE id=?",(int(cid),)).fetchone()
+    if not row or row['status']!='active':
+        await q.answer('این مسابقه فعال نیست.',show_alert=True);return
+    with con() as c: participant=c.execute('SELECT id FROM contest_participants WHERE id=? AND contest_id=?',(int(participant_id),int(cid))).fetchone()
+    if not participant:
+        await q.answer('این شرکت‌کننده در مسابقه نیست.',show_alert=True);return
+    try:
+        member=await ctx.bot.get_chat_member(_challenge_channel_value(),uid)
+        joined=member.status in ('creator','administrator','member') or (member.status=='restricted' and bool(getattr(member,'is_member',False)))
+    except Exception as exc:
+        logging.warning('Challenge channel membership check failed: %s',str(exc)[:150])
+        await q.answer('بررسی عضویت فعلاً ممکن نیست؛ مدیر باید ربات رو ادمین کانال کنه.',show_alert=True);return
+    if not joined:
+        await q.answer('اول عضو کانال مسابقه شو، بعد دوباره رأی بده.',show_alert=True);return
+    challenge_mark_started(uid,'stars')
+    with con() as c:
+        starts={r['bot'] for r in c.execute("SELECT bot FROM challenge_starts WHERE uid=? AND bot IN ('vpn','stars')",(uid,)).fetchall()}
+        if 'vpn' not in starts:
+            await q.answer('اول دکمه عضویت در ربات VPN رو بزن و Start کن؛ بعد دوباره رأی بده.',show_alert=True);return
+        existing=c.execute('SELECT choice FROM contest_votes WHERE contest_id=? AND uid=?',(int(cid),uid)).fetchone()
+        if existing:
+            await q.answer('رأی تو قبلاً ثبت شده؛ هر اکانت فقط یک رأی داره.',show_alert=True);return
+        c.execute('INSERT INTO contest_votes(contest_id,uid,choice,created_at) VALUES(?,?,?,?)',(int(cid),uid,str(participant_id),now()))
+    await q.answer('رأی تو ثبت شد! 💙',show_alert=True)
+    await _challenge_refresh_post(ctx.bot,cid)
+# ===== END VYNEXA_CHALLENGE_ENGINE_V1 =====
+
 async def start(up,ctx):
  ensure(up.effective_user)
+ challenge_mark_started(up.effective_user.id,'stars')
+ await _challenge_signal_start(up.effective_user.id)
  if not bot_enabled() and up.effective_user.id not in ADMINS:
   return await up.effective_message.reply_text('🔴 ربات فعلاً خاموش است. لطفاً بعداً دوباره مراجعه کن.')
  welcome = setting('text_welcome','') or ('✨ <b>به Vynexa Stars خوش اومدی!</b>\n\n'
@@ -251,7 +396,8 @@ async def cb(up,ctx):
  q=up.callback_query; u=up.effective_user; ensure(u); d=q.data
  if not bot_enabled() and u.id not in ADMINS and d not in ('home',):
   await q.answer('🔴 ربات فعلاً خاموش است.',show_alert=True); return
- await q.answer()
+ if not d.startswith('ch:vote:'):
+  await q.answer()
  if d=='home': ctx.user_data.pop('product',None); await edit(q,setting('text_menu_prompt','✨ <b>Vynexa Stars</b>\nچه کاری برات انجام بدم؟'),menu(u.id),ParseMode.HTML)
  elif d.startswith('buy:'): await edit(q,'بسته موردنظرت رو انتخاب کن:',product_menu(d.split(':')[1]))
  elif d=='stars:custom':
@@ -321,7 +467,41 @@ async def cb(up,ctx):
   with con() as c: n=c.execute("SELECT COUNT(*) n FROM orders WHERE status IN ('awaiting_receipt','paid_pending_delivery')").fetchone()['n']; w=c.execute("SELECT COUNT(*) n FROM wallet WHERE status='pending'").fetchone()['n']
   status='🟢 روشن' if bot_enabled() else '🔴 خاموش'
   toggle_label='🔴 خاموش کردن ربات' if bot_enabled() else '🟢 روشن کردن ربات'
-  await edit(q,f'🛠 <b>پنل مدیریت</b>\nوضعیت ربات: {status}\nسفارش‌های در انتظار: {n}\nدرخواست‌های کیف پول: {w}',K([[b('📋 سفارش‌های در انتظار','adm:orders')],[b('👛 درخواست‌های کیف پول','adm:wallets')],[b('💰 ویرایش قیمت','adm:price')],[b('🌐 تنظیم کانال‌ها و ربات‌ها','adm:links')],[b('🎨 تغییر ایموجی دکمه‌ها','adm:emoji')],[b('📝 ویرایش متن‌ها','adm:texts')],[b('🖌 ادیت رنگ‌ها','adm:colors')],[b(toggle_label,'adm:togglebot','danger' if bot_enabled() else 'success')],[b('⬅️ منو','home')]]),ParseMode.HTML)
+  await edit(q,f'🛠 <b>پنل مدیریت</b>\nوضعیت ربات: {status}\nسفارش‌های در انتظار: {n}\nدرخواست‌های کیف پول: {w}',K([[b('🏆 مدیریت مسابقات','ch:admin','primary')],[b('📋 سفارش‌های در انتظار','adm:orders')],[b('👛 درخواست‌های کیف پول','adm:wallets')],[b('💰 ویرایش قیمت','adm:price')],[b('🌐 تنظیم کانال‌ها و ربات‌ها','adm:links')],[b('🎨 تغییر ایموجی دکمه‌ها','adm:emoji')],[b('📝 ویرایش متن‌ها','adm:texts')],[b('🖌 ادیت رنگ‌ها','adm:colors')],[b(toggle_label,'adm:togglebot','danger' if bot_enabled() else 'success')],[b('⬅️ منو','home')]]),ParseMode.HTML)
+
+ elif d=='ch:admin':
+  if u.id not in ADMINS:return
+  with con() as c: active=c.execute("SELECT COUNT(*) n FROM contests WHERE status='active'").fetchone()['n']
+  await edit(q,f'🏆 <b>مدیریت مسابقات</b>\nمسابقه‌های فعال: {active}\n\nاز اینجا مسابقه جدید بساز یا مسابقه‌های فعلی رو مدیریت کن.',K([[b('➕ ساخت مسابقه جدید','ch:create','success')],[b('📋 مسابقه‌های فعال','ch:list')],[b('⬅️ پنل مدیریت','admin')]]),ParseMode.HTML)
+ elif d=='ch:create':
+  if u.id not in ADMINS:return
+  ctx.user_data['ch_create']={'step':'title'}
+  await edit(q,'🏆 عنوان مسابقه رو بفرست:',K([[b('❌ لغو','ch:admin')]]))
+ elif d=='ch:list':
+  if u.id not in ADMINS:return
+  with con() as c: rows=c.execute("SELECT id,title FROM contests WHERE status='active' ORDER BY id DESC LIMIT 15").fetchall()
+  buttons=[]
+  for r in rows:
+   buttons.append([b(f"➕ افزودن اسم به #{r['id']}",f"ch:add:{r['id']}",'success'),b(f"⛔ بستن #{r['id']}",f"ch:stop:{r['id']}",'danger')])
+  buttons.append([b('⬅️ مدیریت مسابقات','ch:admin')])
+  await edit(q,'📋 <b>مسابقه‌های فعال</b>\n\n'+('\n'.join(f"#{r['id']} · {html.escape(r['title'])} · بدون محدودیت زمانی" for r in rows) if rows else 'مسابقه فعالی وجود نداره.'),K(buttons),ParseMode.HTML)
+ elif d.startswith('ch:add:'):
+  if u.id not in ADMINS:return
+  cid=int(d.rsplit(':',1)[1]);ctx.user_data['ch_add_participant']=cid
+  await edit(q,f'اسم شرکت‌کننده جدید برای مسابقه #{cid} رو بفرست.\nبرای لغو، «لغو» بفرست.',K([[b('⬅️ بازگشت','ch:list')]]))
+ elif d.startswith('ch:page:'):
+  parts=d.split(':')
+  if len(parts)==4:
+   await _challenge_refresh_post(ctx.bot,int(parts[2]),False,int(parts[3]))
+ elif d.startswith('ch:stop:'):
+  if u.id not in ADMINS:return
+  cid=int(d.rsplit(':',1)[1])
+  await _challenge_close(ctx.bot,cid)
+  await edit(q,f'✅ مسابقه #{cid} متوقف و نتیجه اعلام شد.',K([[b('⬅️ مدیریت مسابقات','ch:admin')]]))
+ elif d.startswith('ch:vote:'):
+  parts=d.split(':')
+  if len(parts)==4 and parts[3].isdigit():
+   await challenge_vote(q,ctx,int(parts[2]),int(parts[3]))
  elif d=='adm:colors':
   if u.id not in ADMINS:return
   ctx.user_data.pop('admin_setting_mode',None)
@@ -404,7 +584,7 @@ async def cb(up,ctx):
  elif d.startswith('adm:textedit:'):
   if u.id not in ADMINS:return
   key=d.split(':',2)[2]
-  labels={'menu_prompt':'متن منوی اصلی','welcome':'پیام شروع','help':'راهنما','support_prompt':'متن پشتیبانی','trust':'متن اعتمادسازی','gift':'متن گیفت','boost':'متن بوست','rules':'قوانین خرید','buyguide':'راهنمای خرید'}
+  labels={'menu_prompt':'متن منوی اصلی','welcome':'پیام شروع','help':'راهنما','support_prompt':'متن پشتیبانی','trust':'متن اعتمادسازی','gift':'متن گیفت','boost':'متن بوست'}
   if key not in labels:return
   ctx.user_data['admin_setting_mode']='text_edit_'+key;ctx.user_data['admin_text_key']=key
   await edit(q,f'✏️ <b>{labels[key]}</b>\nمتن جدید رو در یک پیام بفرست. ایموجی‌های پریمیوم/Custom Emoji هم ذخیره می‌شن.',K([[b('❌ لغو','adm:textcancel')],[b('⬅️ فهرست متن‌ها','adm:texts')]]),ParseMode.HTML)
@@ -412,30 +592,14 @@ async def cb(up,ctx):
   if u.id not in ADMINS:return
   ctx.user_data.pop('admin_setting_mode',None);ctx.user_data.pop('admin_text_key',None)
   await edit(q,'ویرایش متن لغو شد.',K([[b('📝 ویرایش متن‌ها','adm:texts')],[b('⬅️ پنل','admin')]]))
- elif d=='adm:emoji' or d.startswith('adm:emojipage:'):
+ elif d=='adm:emoji':
   if u.id not in ADMINS:return
-  emoji_items=[('stars','⭐ خرید استارز'),('premium','💎 خرید پریمیوم'),('wallet','👛 کیف پول'),('orders','🧾 سفارش‌های من'),('links','🌐 کانال‌ها و ربات‌ها'),('support','📞 پشتیبانی'),('admin','🛠 پنل مدیریت')]
-  # Every configured button family is included, with pagination so Telegram does not truncate the list.
-  seen={x[0] for x in emoji_items}
-  main_callback_keys={'buy:stars','buy:premium','wallet','orders','ourlinks','support','admin'}
-  for key,label in COLOR_BUTTONS:
-   if key in seen or key in main_callback_keys: continue
-   emoji_items.append(('btn_'+key.replace(':','_'),label)); seen.add(key)
-  per_page=8; pages=(len(emoji_items)+per_page-1)//per_page
-  page=0 if d=='adm:emoji' else int(d.rsplit(':',1)[1])
-  page=max(0,min(page,pages-1)); start=page*per_page
-  rows=[[b(label,'adm:emojipick:'+key)] for key,label in emoji_items[start:start+per_page]]
-  nav=[]
-  if page>0: nav.append(b('⬅️ قبلی',f'adm:emojipage:{page-1}'))
-  if page<pages-1: nav.append(b('➡️ بعدی',f'adm:emojipage:{page+1}'))
-  if nav: rows.append(nav)
-  rows.append([b('⬅️ پنل','admin')])
-  await edit(q,f'🎨 <b>تغییر ایموجی دکمه‌ها</b>\nمورد موردنظرت رو انتخاب کن.\nصفحه {page+1} از {pages} — بعد از انتخاب، ایموجی معمولی یا پریمیوم رو بفرست.',K(rows),ParseMode.HTML)
+  emoji_items=[('stars','⭐ استارز'),('premium','💎 پریمیوم'),('wallet','👛 کیف پول'),('orders','🧾 سفارش‌ها'),('links','🌐 لینک‌ها'),('support','📞 پشتیبانی'),('admin','🛠 مدیریت')]
+  await edit(q,'🎨 <b>انتخاب ایموجی دکمه‌ها</b>\nاول مورد رو انتخاب کن؛ بعد ایموجی معمولی یا پریمیوم رو در یک پیام بفرست. شناسهٔ ایموجی پریمیوم ذخیره می‌شه.',K([[b(label,'adm:emojipick:'+key)] for key,label in emoji_items]+[[b('⬅️ پنل','admin')]]),ParseMode.HTML)
  elif d.startswith('adm:emojipick:'):
   if u.id not in ADMINS:return
   key=d.split(':',2)[2]
-  allowed={'stars','premium','wallet','orders','links','support','admin'} | {'btn_'+x[0].replace(':','_') for x in COLOR_BUTTONS}
-  if key not in allowed:return
+  if key not in {'stars','premium','wallet','orders','links','support','admin'}:return
   ctx.user_data['admin_setting_mode']='emoji_pick';ctx.user_data['emoji_pick_key']=key
   await edit(q,f'🎨 ایموجی جدید برای «{key}» رو همین‌جا بفرست؛ ایموجی پریمیوم هم قبوله.',K([[b('❌ لغو','adm:emojicancel')],[b('⬅️ فهرست ایموجی‌ها','adm:emoji')]]))
  elif d=='adm:emojicancel':
@@ -493,6 +657,33 @@ async def messages(up,ctx):
  if not bot_enabled() and u.id not in ADMINS:
   await m.reply_text('🔴 ربات فعلاً خاموش است. لطفاً بعداً دوباره مراجعه کن.')
   return
+ if m.text and ctx.user_data.get('ch_create') and u.id in ADMINS:
+  state=ctx.user_data['ch_create']; value=m.text.strip()
+  if value.lower() in ('لغو','cancel','/cancel'):
+   ctx.user_data.pop('ch_create',None); await m.reply_text('ساخت مسابقه لغو شد.',reply_markup=K([[b('🏆 مدیریت مسابقات','ch:admin')]])); return
+  step=state.get('step')
+  if step=='title': state['title']=value[:120];state['step']='first';await m.reply_text('اسم اولین شرکت‌کننده رو بفرست:');return
+  if step=='first':
+   state['first']=value[:60]
+   try:
+    await _challenge_create_publish(ctx,u.id,state)
+    ctx.user_data.pop('ch_create',None)
+   except Exception as exc:
+    logging.exception('Challenge publish failed')
+    await m.reply_text('❌ انتشار مسابقه انجام نشد. مطمئن شو ربات ادمین کاناله و CHALLENGE_CHANNEL_ID درست تنظیم شده.');ctx.user_data.pop('ch_create',None)
+   return
+ if m.text and ctx.user_data.get('ch_add_participant') and u.id in ADMINS:
+  cid=int(ctx.user_data['ch_add_participant']);value=m.text.strip()
+  if value.lower() in ('لغو','cancel','/cancel'):
+   ctx.user_data.pop('ch_add_participant',None);await m.reply_text('افزودن شرکت‌کننده لغو شد.',reply_markup=K([[b('🏆 مدیریت مسابقات','ch:admin')]]));return
+  try:
+   await challenge_add_participant(ctx,u.id,cid,value[:60]);ctx.user_data.pop('ch_add_participant',None)
+   await m.reply_text(f'✅ «{html.escape(value[:60])}» به مسابقه #{cid} اضافه شد و پست کانال به‌روز شد.',parse_mode=ParseMode.HTML,reply_markup=K([[b('➕ افزودن نفر بعدی',f'ch:add:{cid}')],[b('📋 مسابقه‌های فعال','ch:list')]]))
+  except sqlite3.IntegrityError:
+   await m.reply_text('این اسم قبلاً به این مسابقه اضافه شده؛ یه اسم دیگه بفرست یا «لغو» کن.')
+  except Exception as exc:
+   logging.exception('Challenge participant add failed');await m.reply_text('❌ افزودن شرکت‌کننده انجام نشد؛ مسابقه رو بررسی کن.')
+  return
  if m.text and ctx.user_data.get('await_custom_stars'):
   raw=m.text.replace(',','').replace('٬','').replace('،','').strip()
   if not raw.isdigit() or not (50 <= int(raw) <= 100000):
@@ -540,8 +731,7 @@ async def messages(up,ctx):
   return
  if m.text and ctx.user_data.get('admin_setting_mode')=='emoji_pick' and u.id in ADMINS:
   key=ctx.user_data.pop('emoji_pick_key',None);ctx.user_data.pop('admin_setting_mode',None)
-  allowed={'stars','premium','wallet','orders','links','support','admin'} | {'btn_'+x[0].replace(':','_') for x in COLOR_BUTTONS}
-  if not key or key not in allowed:
+  if not key or key not in {'stars','premium','wallet','orders','links','support','admin'}:
    await m.reply_text('مورد ایموجی پیدا نشد؛ دوباره از منو انتخاب کن.',reply_markup=K([[b('🎨 ایموجی‌ها','adm:emoji')]]));return
   entity=next((e for e in (m.entities or []) if e.type=='custom_emoji'),None)
   if entity:
@@ -550,10 +740,7 @@ async def messages(up,ctx):
   else: value=m.text.strip()
   if not value or len(value)>64:
    await m.reply_text('فقط یک ایموجی بفرست.',reply_markup=K([[b('🎨 دوباره انتخاب کن','adm:emoji')]]));return
-  if key.startswith('btn_'):
-   set_setting('emoji_button_'+key[4:],value)
-  else:
-   set_setting('emoji_'+key,value)
+  set_setting('emoji_'+key,value)
   await m.reply_text('✅ ایموجی ذخیره شد. شناسهٔ ایموجی پریمیوم هم حفظ شد.',reply_markup=K([[b('🎨 انتخاب ایموجی دیگر','adm:emoji')],[b('⬅️ پنل مدیریت','admin')]]),parse_mode=ParseMode.HTML)
   return
  if m.text and ctx.user_data.get('admin_setting_mode') and u.id in ADMINS:
@@ -629,6 +816,7 @@ async def post_init(app):
  for k in ('50','100','250','500','1000'): STARS[k]=int(setting('PRICE_STARS_'+k,str(STARS[k])))
  try: await app.bot.set_my_commands([('start','شروع ربات'),('help','راهنما')])
  except TelegramError: pass
+ await _challenge_start_server(app)
  logging.info('Vynexa Stars started')
 def main():
  if not TOKEN:raise SystemExit('BOT_TOKEN را در Environment Variables هاست تنظیم کن.')
