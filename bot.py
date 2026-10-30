@@ -841,9 +841,15 @@ def _challenge_start_server(app):
             return self._reply(404, {'ok': False, 'error': 'not_found'})
 
         def do_POST(self):
-            if urlsplit(self.path).path.rstrip('/') != '/started':
-                return self._reply(404, {'ok': False, 'error': 'not_found'})
+            request_path = urlsplit(self.path).path.rstrip('/')
             supplied = ''.join(self.headers.get('X-Vynexa-Secret', '').split())
+            # Diagnostic: confirms whether the request reaches this Python handler.
+            logging.info(
+                'Challenge POST received: path=%s header_present=%s received_fp=%s',
+                request_path, bool(supplied), _challenge_fp(supplied)
+            )
+            if request_path != '/started':
+                return self._reply(404, {'ok': False, 'error': 'not_found'})
             if not hmac.compare_digest(supplied, secret):
                 logging.warning('Challenge auth rejected: expected_fp=%s received_fp=%s header_present=%s', _challenge_fp(secret), _challenge_fp(supplied), bool(supplied))
                 return self._reply(403, {'ok': False, 'error': 'forbidden'})
