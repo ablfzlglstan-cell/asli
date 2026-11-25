@@ -1,122 +1,208 @@
-import asyncio, logging, os, sqlite3
-from datetime import datetime, timezone
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery
+# bot.py
+import asyncio
+import logging
+import sqlite3
+import random
+import time
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest
+from datetime import datetime, timedelta
+from config import BOT_TOKEN, OWNER_ID
 
-TOKEN=os.getenv("BOT_TOKEN","").strip()
-OWNER_ID=int(os.getenv("OWNER_ID","0"))
-DB=os.getenv("DB_PATH","fox_reporter_pro.db")
-dp=Dispatcher(); waiting={}
+# --- تنظیمات ---
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE" # <--- توکن خود را اینجا وارد کنید
+OWNER_ID = 123456789 # <--- آیدی عددی خودتان را وارد کنید
+
 logging.basicConfig(level=logging.INFO)
 
-def connect(): return sqlite3.connect(DB)
-def now(): return datetime.now(timezone.utc).isoformat()
-def init():
-    with connect() as c:
-        c.execute("CREATE TABLE IF NOT EXISTS admins(uid INTEGER PRIMARY KEY, role TEXT, active INTEGER, added TEXT)")
-        c.execute("CREATE TABLE IF NOT EXISTS tickets(id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER, username TEXT, body TEXT, status TEXT DEFAULT 'open', reply TEXT, created TEXT)")
-        c.execute("CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, actor INTEGER, event TEXT, created TEXT)")
-        c.execute("CREATE TABLE IF NOT EXISTS demos(id INTEGER PRIMARY KEY AUTOINCREMENT, actor INTEGER, created TEXT)")
-        c.execute("INSERT OR IGNORE INTO admins VALUES(?,?,1,?)",(OWNER_ID,"owner",now()))
-def event(uid,txt):
-    with connect() as c: c.execute("INSERT INTO events(actor,event,created) VALUES(?,?,?)",(uid,txt,now()))
-def admin(uid):
-    with connect() as c: r=c.execute("SELECT active FROM admins WHERE uid=?",(uid,)).fetchone()
-    return bool(r and r[0])
-def owner(uid):
-    with connect() as c: r=c.execute("SELECT role FROM admins WHERE uid=? AND active=1",(uid,)).fetchone()
-    return bool(r and r[0]=="owner")
-def keyboard(uid):
-    b=InlineKeyboardBuilder(); b.button(text="🎫 ثبت تیکت",callback_data="ticket")
-    if admin(uid):
-        b.button(text="📊 آمار",callback_data="stats"); b.button(text="🧪 شبیه‌سازی",callback_data="demo"); b.button(text="📨 تیکت‌های باز",callback_data="tickets")
-    if owner(uid): b.button(text="👥 مدیران",callback_data="admins")
-    b.adjust(1); return b.as_markup()
+# --- دیتابیس ---
+DB_NAME = "fox_reporter.db"
 
-@dp.message(CommandStart())
-async def start(m:Message):
-    await m.answer("🦊 FOX REPORTER PRO\\n\\nپنل مدیریت تیکت و دسترسی‌ها با شبیه‌ساز محلی. این نسخه ریپورت خودکار انجام نمی‌دهد و سشن یا کد ورود جمع‌آوری نمی‌کند.",reply_markup=keyboard(m.from_user.id))
-@dp.message(Command("help"))
-async def help_(m:Message): await m.answer("برای ثبت درخواست، دکمه ثبت تیکت را بزن. مدیران: /addadmin ID ، /deladmin ID ، /reply TICKET_ID متن")
-@dp.callback_query(F.data=="ticket")
-async def ticket(q:CallbackQuery):
-    waiting[q.from_user.id]="ticket"; await q.message.answer("متن درخواستت رو بفرست. رمز، کد ورود یا اطلاعات خصوصی دیگران رو ارسال نکن."); await q.answer()
-@dp.callback_query(F.data=="stats")
-async def stats(q:CallbackQuery):
-    if not admin(q.from_user.id): await q.answer("دسترسی نداری",show_alert=True); return
-    with connect() as c:
-        t=c.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]; op=c.execute("SELECT COUNT(*) FROM tickets WHERE status='open'").fetchone()[0]
-        a=c.execute("SELECT COUNT(*) FROM admins WHERE active=1").fetchone()[0]; d=c.execute("SELECT COUNT(*) FROM demos").fetchone()[0]
-    await q.message.answer(f"📊 آمار\\nکل تیکت‌ها: {t}\\nتیکت‌های باز: {op}\\nمدیران فعال: {a}\\nشبیه‌سازی‌ها: {d}"); await q.answer()
-@dp.callback_query(F.data=="demo")
-async def demo(q:CallbackQuery):
-    if not admin(q.from_user.id): await q.answer("دسترسی نداری",show_alert=True); return
-    await q.answer(); msg=await q.message.answer("🧪 شبیه‌سازی محلی: 0%")
-    for p in (20,40,60,80,100):
-        await asyncio.sleep(1)
-        try: await msg.edit_text(f"🧪 شبیه‌سازی محلی: {p}%")
-        except TelegramBadRequest: pass
-    with connect() as c: c.execute("INSERT INTO demos(actor,created) VALUES(?,?)",(q.from_user.id,now()))
-    event(q.from_user.id,"completed demo")
-@dp.callback_query(F.data=="tickets")
-async def tickets(q:CallbackQuery):
-    if not admin(q.from_user.id): await q.answer("دسترسی نداری",show_alert=True); return
-    with connect() as c: rows=c.execute("SELECT id,uid,body FROM tickets WHERE status='open' ORDER BY id DESC LIMIT 10").fetchall()
-    if not rows: await q.message.answer("تیکت بازی نیست.")
-    for tid,uid,body in rows: await q.message.answer(f"🎫 #{tid} از {uid}\\n{body[:2500]}\\n\\nپاسخ: /reply {tid} متن")
-    await q.answer()
-@dp.callback_query(F.data=="admins")
-async def admins(q:CallbackQuery):
-    if not owner(q.from_user.id): await q.answer("فقط مالک",show_alert=True); return
-    with connect() as c: rows=c.execute("SELECT uid,role,active FROM admins ORDER BY role,uid").fetchall()
-    await q.message.answer("👥 مدیران\\n"+"\\n".join(f"{u} | {r} | {'فعال' if a else 'غیرفعال'}" for u,r,a in rows)+"\\n\\n/addadmin ID\\n/deladmin ID"); await q.answer()
-@dp.message(Command("addadmin"))
-async def addadmin(m:Message):
-    if not owner(m.from_user.id): return
-    p=(m.text or "").split()
-    if len(p)!=2 or not p[1].isdigit(): await m.answer("فرمت: /addadmin شناسه"); return
-    uid=int(p[1])
-    with connect() as c: c.execute("INSERT INTO admins VALUES(?,?,1,?) ON CONFLICT(uid) DO UPDATE SET role='admin',active=1",(uid,"admin",now()))
-    event(m.from_user.id,f"added admin {uid}"); await m.answer("مدیر اضافه شد.")
-@dp.message(Command("deladmin"))
-async def deladmin(m:Message):
-    if not owner(m.from_user.id):
+def get_db():
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        role TEXT DEFAULT 'user',
+        subscription_until TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        is_blocked INTEGER DEFAULT 0
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        phone_number TEXT UNIQUE,
+        api_id INTEGER,
+        api_hash TEXT,
+        session_string TEXT,
+        status TEXT DEFAULT 'active',
+        assigned_to_admin_id INTEGER,
+        last_used TEXT
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS smtp_servers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT,
+        password TEXT,
+        host TEXT DEFAULT 'smtp.gmail.com',
+        port INTEGER DEFAULT 587,
+        is_active INTEGER DEFAULT 1
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS reports_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_type TEXT,
+        target_id TEXT,
+        reporter_user_id INTEGER,
+        status TEXT,
+        timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )""")
+    # Default Settings
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('mandatory_channel_id', '')")
+    conn.commit()
+    conn.close()
+
+def add_user(user_id, username=None, role='user'):
+    conn = get_db()
+    conn.execute("INSERT OR IGNORE INTO users (user_id, username, role) VALUES (?, ?, ?)", (user_id, username, role))
+    conn.commit()
+    conn.close()
+
+def get_user(user_id):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    if row:
+        return dict(row)
+    return None
+
+def update_role(user_id, role):
+    conn = get_db()
+    conn.execute("UPDATE users SET role = ? WHERE user_id = ?", (role, user_id))
+    conn.commit()
+    conn.close()
+
+def log_report(target_type, target_id, reporter_id, status):
+    conn = get_db()
+    conn.execute("INSERT INTO reports_log (target_type, target_id, reporter_user_id, status) VALUES (?, ?, ?, ?)",
+                 (target_type, target_id, reporter_id, status))
+    conn.commit()
+    conn.close()
+
+def get_reports_stats(user_id=None):
+    conn = get_db()
+    if user_id:
+        total = conn.execute("SELECT COUNT(*) FROM reports_log WHERE reporter_user_id = ?", (user_id,)).fetchone()[0]
+        success = conn.execute("SELECT COUNT(*) FROM reports_log WHERE reporter_user_id = ? AND status = 'success'", (user_id,)).fetchone()[0]
+        failed = conn.execute("SELECT COUNT(*) FROM reports_log WHERE reporter_user_id = ? AND status = 'failed'", (user_id,)).fetchone()[0]
+    else:
+        total = conn.execute("SELECT COUNT(*) FROM reports_log").fetchone()[0]
+        success = conn.execute("SELECT COUNT(*) FROM reports_log WHERE status = 'success'").fetchone()[0]
+        failed = conn.execute("SELECT COUNT(*) FROM reports_log WHERE status = 'failed'").fetchone()[0]
+    conn.close()
+    return {"total": total, "success": success, "failed": failed}
+
+# --- State Management ---
+pending_operations = {}
+
+# --- Handlers ---
+dp = Dispatcher()
+bot = Bot(token=BOT_TOKEN)
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    user = get_user(message.from_user.id)
+    if not user:
+        add_user(message.from_user.id, message.from_user.username)
+        user = get_user(message.from_user.id)
+
+    if user.get('is_blocked'):
+        await message.answer("🚫 شما محروم شده‌اید.")
         return
-    p=(m.text or "").split()
-    if len(p)!=2 or not p[1].isdigit(): await m.answer("فرمت: /deladmin شناسه"); return
-    uid=int(p[1])
-    if uid==OWNER_ID: await m.answer("مالک اصلی قابل حذف نیست."); return
-    with connect() as c: c.execute("UPDATE admins SET active=0 WHERE uid=? AND role!='owner'",(uid,))
-    event(m.from_user.id,f"disabled admin {uid}"); await m.answer("دسترسی غیرفعال شد.")
-@dp.message(Command("reply"))
-async def reply(m:Message,bot:Bot):
-    if not admin(m.from_user.id): return
-    p=(m.text or "").split(maxsplit=2)
-    if len(p)<3 or not p[1].isdigit(): await m.answer("فرمت: /reply شماره متن پاسخ"); return
-    tid,txt=int(p[1]),p[2]
-    with connect() as c:
-        r=c.execute("SELECT uid FROM tickets WHERE id=?",(tid,)).fetchone()
-        if r: c.execute("UPDATE tickets SET status='closed',reply=? WHERE id=?",(txt,tid))
-    if not r: await m.answer("تیکت پیدا نشد."); return
-    try: await bot.send_message(r[0],f"📩 پاسخ تیکت #{tid}:\\n{txt}"); await m.answer("پاسخ ارسال شد و تیکت بسته شد.")
-    except Exception: await m.answer("پاسخ ذخیره شد؛ ارسال پیام به کاربر ناموفق بود.")
-    event(m.from_user.id,f"replied ticket {tid}")
-@dp.message()
-async def incoming(m:Message):
-    if waiting.pop(m.from_user.id,None)=="ticket":
-        body=(m.text or "").strip()
-        if len(body)<5 or len(body)>3000: await m.answer("متن باید بین ۵ تا ۳۰۰۰ نویسه باشد. دوباره تیکت را بزن."); return
-        with connect() as c:
-            cur=c.execute("INSERT INTO tickets(uid,username,body,created) VALUES(?,?,?,?)",(m.from_user.id,m.from_user.username,body,now())); tid=cur.lastrowid
-        event(m.from_user.id,f"created ticket {tid}"); await m.answer(f"✅ تیکت #{tid} ثبت شد.")
-        try: await m.bot.send_message(OWNER_ID,f"🎫 تیکت جدید #{tid} از {m.from_user.id}\\n\\n{body[:2500]}")
-        except Exception: logging.exception("owner notification failed")
-    else: await m.answer("برای شروع /start را بزن.")
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📢 ریپورت", callback_data="report_menu")
+    kb.button(text="👤 حساب من", callback_data="my_account")
+    kb.button(text="🎧 پشتیبانی", callback_data="support")
+    kb.button(text="⚙️ پنل ادمین", callback_data="admin_panel") if user.get('role') in ['admin', 'owner'] else None
+
+    welcome_text = """🦊 <b>به Fox Reporter خوش آمدید!</b>\n\nبرای شروع یکی از گزینه‌های زیر را انتخاب کنید."""
+    await message.answer(welcome_text, reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data == "report_menu")
+async def cb_report_menu(callback: CallbackQuery):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📝 کانال", callback_data="rep_channel")
+    kb.button(text="👥 گروه", callback_data="rep_group")
+    kb.button(text="📄 پست", callback_data="rep_post")
+    kb.button(text="👤 پروفایل", callback_data="rep_profile")
+    kb.button(text="🔙 بازگشت", callback_data="back_home")
+    await callback.message.edit_text("نوع هدف را انتخاب کنید:", reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data.startswith("rep_"))
+async def cb_select_target(callback: CallbackQuery):
+    target_type = callback.data.replace("rep_", "")
+    pending_operations[callback.from_user.id] = {'type': target_type, 'step': 'waiting_link'}
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔙 بازگشت", callback_data="report_menu")
+    await callback.message.edit_text(f"🔗 لینک یا آیدی {target_type} را ارسال کنید:", reply_markup=kb.as_markup())
+
+@dp.message(F.text)
+async def process_input(message: Message):
+    user_id = message.from_user.id
+    if user_id in pending_operations and pending_operations[user_id].get('step') == 'waiting_link':
+        target_type = pending_operations[user_id]['type']
+        link = message.text.strip()
+        pending_operations.pop(user_id)
+        await simulate_report(message, target_type, link, user_id)
+
+async def simulate_report(message: Message, target_type: str, target_id: str, user_id: int):
+    progress_msg = await message.answer(f"🔄 شروع ریپورت {target_type}...")
+
+    # شبیه‌سازی ساده
+    for i in range(1, 6):
+        await asyncio.sleep(1)
+        status = "success" if random.random() > 0.2 else "failed"
+        log_report(target_type, target_id, user_id, status)
+
+        percent = i * 20
+        await progress_msg.edit_text(f"🔄 گزارش پیشرفت:\n✅ موفق: {i-1}\n❌ ناموفق: {5-i}\n📊 درصد: {percent}%")
+
+    await progress_msg.edit_text(f"✅ عملیات تمام شد!")
+
+@dp.callback_query(F.data == "my_account")
+async def cb_my_account(callback: CallbackQuery):
+    stats = get_reports_stats(callback.from_user.id)
+    text = f"👤 <b>آمار شما:</b>\nکل: {stats['total']}\nموفق: {stats['success']}\nناموفق: {stats['failed']}"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔙 بازگشت", callback_data="home")
+    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "admin_panel")
+async def cb_admin_panel(callback: CallbackQuery):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="👥 کاربران", callback_data="adm_users")
+    kb.button(text="🔙 بازگشت", callback_data="home")
+    await callback.message.edit_text("پنل مدیریت:", reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data == "back_home")
+async def cb_back_home(callback: CallbackQuery):
+    await callback.message.delete()
+    await cmd_start(callback.message)
+
 async def main():
-    if not TOKEN: raise RuntimeError("BOT_TOKEN تنظیم نشده است.")
-    if OWNER_ID<=0: raise RuntimeError("OWNER_ID باید شناسه عددی معتبر باشد.")
-    init(); await dp.start_polling(Bot(TOKEN))
-if __name__=="__main__": asyncio.run(main())
+    init_db()
+    print("Bot started...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
